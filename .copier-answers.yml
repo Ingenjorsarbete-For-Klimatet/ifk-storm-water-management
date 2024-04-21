@@ -1,0 +1,10 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: 0.1.2
+_src_path: https://github.com/Ingenjorsarbete-For-Klimatet/ifk-python-template.git
+author: IFK
+badge_gistid: ''
+email: info@ingenjorsarbeteforklimatet.se
+module_name: storm_water_management
+package_name: storm_water_management
+project_description: Unspecified.
+project_name: ifk-storm-water-management
