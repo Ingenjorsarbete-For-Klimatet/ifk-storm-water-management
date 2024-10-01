@@ -77,7 +77,6 @@ def get_coordinates_from_tfw(filename: str) -> np.array:
         elevation data
     """
     with open(filename, "r") as f:
-
         tfw = [float(x) for x in f.readlines()]
 
     return tfw
