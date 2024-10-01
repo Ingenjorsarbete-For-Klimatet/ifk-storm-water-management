@@ -1,7 +1,11 @@
+"""Utils."""
+
+import json
+
 import numpy as np
 import rasterio
 import richdem
-import json
+
 
 def get_coordinate_center_points_from_tfw(
     tfw: list,
@@ -11,13 +15,17 @@ def get_coordinate_center_points_from_tfw(
     n_points_x: int,
     n_points_y: int,
 ) -> list:
-    """Get coordinates for centerpoints
+    """Get coordinates for centerpoints.
 
     Args:
-        tfw:
-
+        tfw: coordinate info.
+        elev_data: elevation data
+        flow_data: data from flow analysis
+        depression_filling_data: data from depression filling analysis
+        n_points_x: number of longitudinal points to consider
+        n_points_y: number of lateral points to consider
     Retrun:
-        elevation data, flow data, and depression fill
+        list with data aggregated in geojson format
     """
     size_x = tfw[0]
     size_y = tfw[3]
@@ -31,21 +39,21 @@ def get_coordinate_center_points_from_tfw(
             center_y = upper_left_y - (row * size_y)
             points.append(
                 {
-                    "type": "Feature", 
+                    "type": "Feature",
                     "geometry": {"type": "Point", "coordinates": [center_x, center_y]},
-                    "properties":{
+                    "properties": {
                         "elevation_data": float(elev_data[row][col]),
                         "water_flow": float(flow_data[row][col]),
-                        "depression_filling": float(depression_filling_data[row][col])
-                        },
-                    }
+                        "depression_filling": float(depression_filling_data[row][col]),
+                    },
+                }
             )
 
     return points
 
 
 def get_elevation_data_from_tif(filename: str) -> np.array:
-    """Get elevation data
+    """Get elevation data.
 
     Args:
         filename: name of tif file
@@ -58,8 +66,9 @@ def get_elevation_data_from_tif(filename: str) -> np.array:
 
     return elevation_data[0]
 
+
 def get_coordinates_from_tfw(filename: str) -> np.array:
-    """Get elevation data
+    """Get coordinates from tfw.
 
     Args:
         filename: name of tif file
@@ -73,15 +82,13 @@ def get_coordinates_from_tfw(filename: str) -> np.array:
 
     return tfw
 
-def save_to_geojson(data: list, filname: str):
-    """Get elevation data
+
+def save_to_geojson(data: list, filename: str) -> None:
+    """Save to geojson.
 
     Args:
         data: data to save
         filename: name of file to save
-
-    Retrun:
-        elevation data
     """
-    with open(f"{filname}.json", "w") as f:
+    with open(f"{filename}.json", "w") as f:
         json.dump(data, f)
