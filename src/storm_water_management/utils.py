@@ -52,7 +52,7 @@ def get_coordinate_center_points_from_tfw(
     return points
 
 
-def get_elevation_data_from_tif(filename: str) -> np.array:
+def get_elevation_data_from_tif(filename: str) -> np.ndarray:
     """Get elevation data.
 
     Args:
@@ -67,7 +67,7 @@ def get_elevation_data_from_tif(filename: str) -> np.array:
     return elevation_data[0]
 
 
-def get_coordinates_from_tfw(filename: str) -> np.array:
+def get_coordinates_from_tfw(filename: str) -> np.ndarray:
     """Get coordinates from tfw.
 
     Args:
