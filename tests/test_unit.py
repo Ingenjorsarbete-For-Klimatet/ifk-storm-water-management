@@ -5,8 +5,8 @@ import richdem as rd
 from storm_water_management import utils
 
 
-def test_unit_temp():
-    """Unit test of temp function."""
+def test_compile_data_to_geojson():
+    """Test compile_data_to_geojson"""
     n_x = 2
     n_y = 2
     rda_fill_diff = rd.rdarray([[1.0, 1.0], [2.0, 2.0]], no_data=-9999)
@@ -16,7 +16,7 @@ def test_unit_temp():
 
     print(rda_fill_diff[1])
 
-    geojson_data = utils.get_coordinate_center_points_from_tfw(
+    geojson_data = utils.compile_data_to_geojson(
         tfw, elevation_data, accum_d8, rda_fill_diff, n_x, n_y
     )
 

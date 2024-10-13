@@ -7,7 +7,7 @@ import rasterio
 import richdem
 
 
-def get_coordinate_center_points_from_tfw(
+def compile_data_to_geojson(
     tfw: list,
     elev_data: richdem.rdarray,
     flow_data: richdem.rdarray,
@@ -15,10 +15,10 @@ def get_coordinate_center_points_from_tfw(
     n_points_x: int,
     n_points_y: int,
 ) -> list:
-    """Get coordinates for centerpoints.
+    """Compile data to geojson format.
 
     Args:
-        tfw: coordinate info.
+        tfw: coordinate info
         elev_data: elevation data
         flow_data: data from flow analysis
         depression_filling_data: data from depression filling analysis
