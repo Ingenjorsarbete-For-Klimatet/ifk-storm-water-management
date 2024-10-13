@@ -49,7 +49,7 @@ def main(tif_filename):
         n_x = elevation_data.shape[0]
         n_y = elevation_data.shape[1]
 
-    geojson_data = utils.get_coordinate_center_points_from_tfw(
+    geojson_data = utils.compile_data_to_geojson(
         tfw, elevation_data, accum_d8, rda_fill_diff, n_x, n_y
     )
     utils.save_to_geojson(geojson_data, "64_3_2023")
