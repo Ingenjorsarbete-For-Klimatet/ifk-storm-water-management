@@ -1,6 +1,6 @@
 """Temporary unit test."""
 
-from storm_water_management.storm_water_management import temp
+from storm_water_management import temp
 
 
 def test_unit_temp():
