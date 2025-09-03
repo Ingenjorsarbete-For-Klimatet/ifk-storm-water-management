@@ -92,7 +92,8 @@ def info(dem) -> None:
     print(f"Photometric interpretation: {dem.configs.photometric_interp}")
 
 
-# transform_geojson_points_to_polygons("/home/chris/repos/ifk-storm-water-management/notebooks/FillDepressionsBestCoast.geojson")
+
+
 
 
 def get_tif_as_np_array(filename_path: str, filename: str) -> np.array:
@@ -108,9 +109,64 @@ def get_tif_as_np_array(filename_path: str, filename: str) -> np.array:
     im = Image.open(filename_path + "/" + filename)
     return np.array(im)
 
+def transform_epsg(dem, epsg_in: int = 5845, epsg_out: int = 4326):
+    """Transform raster
+
+    Args:
+        dem: raster with epsg_in
+        epsg_in: epsg code in
+        epsg_out: epsg code out
+
+    Retrun:
+        raster with new epsg code
+    """
+    transformer = Transformer.from_crs("EPSG:" + str(epsg_in), "EPSG:" + str(epsg_out), always_xy=True)
+    lower_lon, lower_lat  = transformer.transform(dem.configs.west, dem.configs.south)
+    upper_lon, upper_lat  = transformer.transform(dem.configs.east, dem.configs.north)
+
+    # write out config
+    out_configs = dem.configs
+    out_configs.east = upper_lon
+    out_configs.north =  upper_lat
+    out_configs.west = lower_lon
+    out_configs.south = lower_lat
+    out_configs.epsg_code = epsg_in
+    out_configs.resolution_x = (upper_lat - lower_lat) / (
+        dem.configs.east - dem.configs.west
+    )
+    out_configs.resolution_y = (upper_lon - lower_lon) / (
+        dem.configs.north - dem.configs.south
+    )
+
+    wbe = WbEnvironment()
+    dem_transformed = wbe.new_raster(out_configs)
+    for row in range(dem.configs.rows):
+        for col in range(dem.configs.columns):
+            dem_transformed[row, col] = dem[row, col]
+
+    return dem_transformed
+
 
 def get_tif_from_np_array(dem, tif_as_array: np.array):
-    """Get tif raster from numpy array.
+    """Write over dem with np array values
+
+    Args:
+        dem: raster
+        tif_as_array: name of tif file
+
+    Retrun:
+        raster overwritten
+    """
+    num_rows, num_cols = tif_as_array.shape
+
+    for row in range(num_rows):
+        for col in range(num_cols):
+            dem[row, col] = float(tif_as_array[row, col])
+
+    return dem
+
+def saturated_upper_limit(dem, upper_limit: float = 1.):
+    """Set upper limit of dem
 
     Args:
         dem: raster
@@ -119,39 +175,44 @@ def get_tif_from_np_array(dem, tif_as_array: np.array):
     Retrun:
         raster
     """
-    out_configs = dem.configs
+    for row in range(dem.configs.rows):
+        for col in range(dem.configs.columns):
+            dem[row, col] = min(upper_limit, dem[row, col])
 
-    # verkar vara EPSG:5845 i.e.,  Horizontal CRS: EPSG:3006 Vertical CRS: EPSG:5613
-    # a little bit unclear if 3006 or 5845
-    transformer = Transformer.from_crs("EPSG:5845", "EPSG:4326")
-    lower_lat, lower_lon = transformer.transform(dem.configs.west, dem.configs.south)
-    upper_lat, upper_lon = transformer.transform(dem.configs.east, dem.configs.north)
+    return dem
 
-    out_configs.east = upper_lat
-    out_configs.north = upper_lon
-    out_configs.west = lower_lat
-    out_configs.south = lower_lon
-    out_configs.epsg_code = 4326
-    out_configs.resolution_x = (upper_lat - lower_lat) / (
-        dem.configs.east - dem.configs.west
-    )
-    out_configs.resolution_y = (upper_lon - lower_lon) / (
-        dem.configs.north - dem.configs.south
-    )
-    # min/max will be set when dem saved?
-    # out_configs.minimum = -10
-    # out_configs.maximum = 200
 
-    wbe = WbEnvironment()
-    # wbe.verbose = True
-    # wbe.working_directory = filename_path
-    topo = wbe.new_raster(out_configs)
+def write_to_png(filename: str, output_filename: str, lower_limit: float = 0.1) -> None:
+    """Write dem file to png.
 
-    num_rows, num_cols = tif_as_array.shape
+    Args:
+        filename: input tif file
+        output_filename: output png file
+        lower_limit: Limit for transparancy
+    """
 
-    for row in range(num_rows):
-        for col in range(num_cols):
-            topo[row, col] = float(tif_as_array[row, col])
-            # topo[row, col] = float(tif_as_array[row, col])
+    import rasterio
+    from PIL import Image
+    import matplotlib.pyplot as plt
 
-    return topo
+    with rasterio.open(filename) as src:
+        data = src.read(1)
+
+    # make a mask for transparent pixels
+    mask = data < lower_limit
+
+    # Normalize values
+    normed = (data - data.min()) / (data.max() - data.min())
+    normed[mask] = np.nan
+
+    # Välj colormap från matplotlib
+    cmap = plt.get_cmap("viridis")  # t.ex. "viridis", "terrain", "plasma"
+
+    # apply color map colormap -> RGBA (0–1 floats)
+    rgba = cmap(normed)
+    rgba = (rgba * 255).astype(np.uint8)
+    rgba[..., 3] = np.where(mask, 0, 255)
+
+    # Save file
+    img = Image.fromarray(rgba, mode="RGBA")
+    img.save(output_filename)

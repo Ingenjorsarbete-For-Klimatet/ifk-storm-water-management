@@ -11,7 +11,7 @@ readme = "README.md"
 authors = [
     { name = "IFK", email = "info@ingenjorsarbeteforklimatet.se" },
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dependencies = [
     "whitebox_workflows==1.3.5",
     "numpy==2.3.1",
