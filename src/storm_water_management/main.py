@@ -30,10 +30,10 @@ def main():
     # dem_smoothed = wbe.feature_preserving_smoothing(dem_from_array, filter_size=11, normal_diff_threshold=10.0, iterations=3)
     dem_smoothed = dem_from_array
     # Fill depressions
-    #dem_no_deps = wbe.fill_depressions_planchon_and_darboux(
+    # dem_no_deps = wbe.fill_depressions_planchon_and_darboux(
     #    dem_smoothed, flat_increment=0.001
-    #)
-    #dem_no_deps = wbe.fill_depressions(dem_smoothed, flat_increment=0.001)
+    # )
+    # dem_no_deps = wbe.fill_depressions(dem_smoothed, flat_increment=0.001)
     dem_no_deps = wbe.fill_depressions_wang_and_liu(dem_smoothed, flat_increment=0.001)
     depression_depth = wbe.raster_calculator(
         "('dem_no_deps'-'dem')", [dem_no_deps, dem_from_array]
@@ -50,14 +50,17 @@ def main():
     # Plot depression filling
     plot_depression = False
     if plot_depression:
-
         fig, ax = plt.subplots()
         ax = show(
             depression_depth,
             ax=ax,
             title="Depression Filling",
             figsize=(10, 7),
-            colorbar_kwargs={"label": "Elevation (m)", "location": "right", "shrink": 0.5},
+            colorbar_kwargs={
+                "label": "Elevation (m)",
+                "location": "right",
+                "shrink": 0.5,
+            },
             zorder=1,
             vmin=0,
             vmax=1,
@@ -67,8 +70,10 @@ def main():
 
     # prepare and save as png
     depression_depth_saturated = saturated_upper_limit(depression_depth)
-    wbe.write_raster(depression_depth_saturated, 'depression_depth_saturated.tif')
-    write_to_png(filename_path + '/depression_depth_saturated.tif', "output_colormap.png")
+    wbe.write_raster(depression_depth_saturated, "depression_depth_saturated.tif")
+    write_to_png(
+        filename_path + "/depression_depth_saturated.tif", "output_colormap.png"
+    )
     info(depression_depth_saturated)
 
     return depression_depth

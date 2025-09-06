@@ -92,10 +92,6 @@ def info(dem) -> None:
     print(f"Photometric interpretation: {dem.configs.photometric_interp}")
 
 
-
-
-
-
 def get_tif_as_np_array(filename_path: str, filename: str) -> np.array:
     """Transform tif raster to numpy array.
 
@@ -109,6 +105,7 @@ def get_tif_as_np_array(filename_path: str, filename: str) -> np.array:
     im = Image.open(filename_path + "/" + filename)
     return np.array(im)
 
+
 def transform_epsg(dem, epsg_in: int = 5845, epsg_out: int = 4326):
     """Transform raster.
 
@@ -120,14 +117,16 @@ def transform_epsg(dem, epsg_in: int = 5845, epsg_out: int = 4326):
     Retrun:
         raster with new epsg code
     """
-    transformer = Transformer.from_crs("EPSG:" + str(epsg_in), "EPSG:" + str(epsg_out), always_xy=True)
-    lower_lon, lower_lat  = transformer.transform(dem.configs.west, dem.configs.south)
-    upper_lon, upper_lat  = transformer.transform(dem.configs.east, dem.configs.north)
+    transformer = Transformer.from_crs(
+        "EPSG:" + str(epsg_in), "EPSG:" + str(epsg_out), always_xy=True
+    )
+    lower_lon, lower_lat = transformer.transform(dem.configs.west, dem.configs.south)
+    upper_lon, upper_lat = transformer.transform(dem.configs.east, dem.configs.north)
 
     # write out config
     out_configs = dem.configs
     out_configs.east = upper_lon
-    out_configs.north =  upper_lat
+    out_configs.north = upper_lat
     out_configs.west = lower_lon
     out_configs.south = lower_lat
     out_configs.epsg_code = epsg_in
@@ -165,7 +164,8 @@ def get_tif_from_np_array(dem, tif_as_array: np.array):
 
     return dem
 
-def saturated_upper_limit(dem, upper_limit: float = 1.):
+
+def saturated_upper_limit(dem, upper_limit: float = 1.0):
     """Set upper limit of dem.
 
     Args:
