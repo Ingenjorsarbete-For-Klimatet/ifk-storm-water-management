@@ -1,7 +1,14 @@
 """Main function."""
 
 import matplotlib.pyplot as plt
-from utils import get_tif_as_np_array, get_tif_from_np_array, info, saturated_upper_limit, write_to_png, transform_epsg
+from utils import (
+    get_tif_as_np_array,
+    get_tif_from_np_array,
+    info,
+    saturated_upper_limit,
+    transform_epsg,
+    write_to_png,
+)
 from whitebox_workflows import WbEnvironment, show
 
 filename_path = "/home/chris/repos/storm_temp/data/1m"
@@ -43,7 +50,7 @@ def main():
     # Plot depression filling
     plot_depression = False
     if plot_depression:
-        
+
         fig, ax = plt.subplots()
         ax = show(
             depression_depth,

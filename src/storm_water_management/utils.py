@@ -110,7 +110,7 @@ def get_tif_as_np_array(filename_path: str, filename: str) -> np.array:
     return np.array(im)
 
 def transform_epsg(dem, epsg_in: int = 5845, epsg_out: int = 4326):
-    """Transform raster
+    """Transform raster.
 
     Args:
         dem: raster with epsg_in
@@ -148,7 +148,7 @@ def transform_epsg(dem, epsg_in: int = 5845, epsg_out: int = 4326):
 
 
 def get_tif_from_np_array(dem, tif_as_array: np.array):
-    """Write over dem with np array values
+    """Write over dem with np array values.
 
     Args:
         dem: raster
@@ -166,11 +166,11 @@ def get_tif_from_np_array(dem, tif_as_array: np.array):
     return dem
 
 def saturated_upper_limit(dem, upper_limit: float = 1.):
-    """Set upper limit of dem
+    """Set upper limit of dem.
 
     Args:
         dem: raster
-        tif_as_array: name of tif file
+        upper_limit: saturation limit.
 
     Retrun:
         raster
@@ -190,10 +190,9 @@ def write_to_png(filename: str, output_filename: str, lower_limit: float = 0.1) 
         output_filename: output png file
         lower_limit: Limit for transparancy
     """
-
+    import matplotlib.pyplot as plt
     import rasterio
     from PIL import Image
-    import matplotlib.pyplot as plt
 
     with rasterio.open(filename) as src:
         data = src.read(1)
