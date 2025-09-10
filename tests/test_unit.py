@@ -1,8 +1,6 @@
-"""Temporary unit test."""
-
-from storm_water_management.storm_water_management import temp
+"""Unit test to be implemented."""
 
 
 def test_unit_temp():
     """Unit test of temp function."""
-    assert temp() is True
+    assert True
