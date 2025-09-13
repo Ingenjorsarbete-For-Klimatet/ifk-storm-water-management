@@ -24,6 +24,7 @@ def main():
 
     raster_as_array = get_tif_as_np_array(filename_path, filename)
     dem_from_array = get_tif_from_np_array(dem, raster_as_array)
+    dem_from_array.configs.epsg_code = 3006
     info(dem_from_array)
 
     # Smooth DEM. Parameters need to be set to proper values.

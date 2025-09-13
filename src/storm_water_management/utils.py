@@ -91,7 +91,10 @@ def info(dem) -> None:
     print(f"Data type: {dem.configs.data_type}")
     print(f"Photometric interpretation: {dem.configs.photometric_interp}")
 
+<<<<<<< Updated upstream
 
+=======
+>>>>>>> Stashed changes
 def get_tif_as_np_array(filename_path: str, filename: str) -> np.array:
     """Transform tif raster to numpy array.
 
@@ -142,6 +145,8 @@ def transform_epsg(dem, epsg_in: int = 5845, epsg_out: int = 4326):
     for row in range(dem.configs.rows):
         for col in range(dem.configs.columns):
             dem_transformed[row, col] = dem[row, col]
+
+    print(f"bounds: [{lower_lon}, {lower_lat}, {upper_lon}, {upper_lat}]")
 
     return dem_transformed
 
@@ -215,3 +220,51 @@ def write_to_png(filename: str, output_filename: str, lower_limit: float = 0.1) 
     # Save file
     img = Image.fromarray(rgba, mode="RGBA")
     img.save(output_filename)
+
+def write_to_png_alpha(filename: str, output_filename: str, alpha_val: float = 0.75) -> None:
+    """Write dem file to png.
+
+    Args:
+        filename: input tif file
+        output_filename: output png file
+        lower_limit: Limit for transparancy
+    """
+    from PIL import Image
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+
+    img = Image.open(filename).convert("L")
+    arr = np.array(img)
+
+    # 2. Normalisera (linjär normalisering mellan min och max i bilden)
+    norm = mcolors.Normalize(vmin=arr.min(), vmax=arr.max())
+
+    # 3. Välj colormap
+    cmap = plt.get_cmap("viridis")
+
+    # 4. Applicera colormap på den normaliserade datan
+    colored = cmap(norm(arr))  # ger RGBA float i [0,1]
+
+    # 5. Lägg på alpha (t.ex. konstant 0.5)
+    colored[..., 3] = alpha_val
+
+    # 6. Konvertera till 8-bit och spara som PNG
+    colored_img = (colored * 255).astype(np.uint8)
+    out = Image.fromarray(colored_img, mode="RGBA")
+
+    # Spara som PNG
+    out.save(output_filename, "PNG")
+
+if __name__ == "__main__":
+    #write_to_png_alpha("/home/chris/repos/storm_temp/data/1m/63950_3150_25.tif", "elevation.png")
+
+    filename_path = "/home/chris/repos/storm_temp/data/1m"
+    filename = "63950_3150_25.tif"
+    wbe = WbEnvironment()
+    wbe.verbose = True
+    wbe.working_directory = filename_path
+    dem = wbe.read_raster(filename)
+
+    transform_epsg(dem, 3006, 4326)
+        
