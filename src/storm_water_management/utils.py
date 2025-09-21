@@ -91,6 +91,7 @@ def info(dem) -> None:
     print(f"Data type: {dem.configs.data_type}")
     print(f"Photometric interpretation: {dem.configs.photometric_interp}")
 
+
 def get_tif_as_np_array(filename_path: str, filename: str) -> np.array:
     """Transform tif raster to numpy array.
 
@@ -212,7 +213,10 @@ def write_to_png(filename: str, output_filename: str, lower_limit: float = 0.1) 
     img = Image.fromarray(rgba, mode="RGBA")
     img.save(output_filename)
 
-def write_to_png_alpha(filename: str, output_filename: str, alpha_val: float = 0.75) -> None:
+
+def write_to_png_alpha(
+    filename: str, output_filename: str, alpha_val: float = 0.75
+) -> None:
     """Write dem file to png.
 
     Args:
@@ -237,8 +241,9 @@ def write_to_png_alpha(filename: str, output_filename: str, alpha_val: float = 0
     out = Image.fromarray(colored_img, mode="RGBA")
     out.save(output_filename, "PNG")
 
+
 if __name__ == "__main__":
-    #write_to_png_alpha("/home/chris/repos/storm_temp/data/1m/63950_3150_25.tif", "elevation.png")
+    # write_to_png_alpha("/home/chris/repos/storm_temp/data/1m/63950_3150_25.tif", "elevation.png")
 
     filename_path = "/home/chris/repos/storm_temp/data/1m"
     filename = "63950_3150_25.tif"
