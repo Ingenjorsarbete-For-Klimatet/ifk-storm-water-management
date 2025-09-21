@@ -1,6 +1,7 @@
 """Main function."""
 
 import matplotlib.pyplot as plt
+from geojson_utils import write_geojson_polynomials_from_tif_to_file
 from utils import (
     get_tif_as_np_array,
     get_tif_from_np_array,
@@ -69,15 +70,18 @@ def main():
         ax.legend()
         plt.show()
 
-    # prepare and save as png
-    depression_depth_saturated = saturated_upper_limit(depression_depth)
-    wbe.write_raster(depression_depth_saturated, "depression_depth_saturated.tif")
-    write_to_png(
-        filename_path + "/depression_depth_saturated.tif", "output_colormap.png"
-    )
-    info(depression_depth_saturated)
+    wbe.write_raster(depression_depth, filename[:-4] + "_depression_depth.tif")
+    write_geojson_polynomials_from_tif_to_file(filename_path + "/" + filename[:-4] + "_depression_depth.tif")
 
-    return depression_depth
+    write_to_png_bool = False
+    if write_to_png_bool:
+        # prepare and save as png
+        depression_depth_saturated = saturated_upper_limit(depression_depth)
+        wbe.write_raster(depression_depth_saturated, "depression_depth_saturated.tif")
+        write_to_png(
+            filename_path + "/depression_depth_saturated.tif", "output_colormap.png")
+        info(depression_depth_saturated)
+
 
 
 if __name__ == "__main__":

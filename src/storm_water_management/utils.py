@@ -91,10 +91,6 @@ def info(dem) -> None:
     print(f"Data type: {dem.configs.data_type}")
     print(f"Photometric interpretation: {dem.configs.photometric_interp}")
 
-<<<<<<< Updated upstream
-
-=======
->>>>>>> Stashed changes
 def get_tif_as_np_array(filename_path: str, filename: str) -> np.array:
     """Transform tif raster to numpy array.
 
@@ -188,7 +184,7 @@ def saturated_upper_limit(dem, upper_limit: float = 1.0):
 
 
 def write_to_png(filename: str, output_filename: str, lower_limit: float = 0.1) -> None:
-    """Write dem file to png.
+    """Write dem file to png. Values lower than lower_limit is set to nan.
 
     Args:
         filename: input tif file
@@ -205,19 +201,14 @@ def write_to_png(filename: str, output_filename: str, lower_limit: float = 0.1) 
     # make a mask for transparent pixels
     mask = data < lower_limit
 
-    # Normalize values
+    # Normalize values and apply color map
     normed = (data - data.min()) / (data.max() - data.min())
     normed[mask] = np.nan
-
-    # Välj colormap från matplotlib
     cmap = plt.get_cmap("viridis")  # t.ex. "viridis", "terrain", "plasma"
-
-    # apply color map colormap -> RGBA (0–1 floats)
     rgba = cmap(normed)
     rgba = (rgba * 255).astype(np.uint8)
     rgba[..., 3] = np.where(mask, 0, 255)
 
-    # Save file
     img = Image.fromarray(rgba, mode="RGBA")
     img.save(output_filename)
 
@@ -227,33 +218,23 @@ def write_to_png_alpha(filename: str, output_filename: str, alpha_val: float = 0
     Args:
         filename: input tif file
         output_filename: output png file
-        lower_limit: Limit for transparancy
+        alpha_val: alpha color
     """
-    from PIL import Image
-    import numpy as np
-    import matplotlib.pyplot as plt
     import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from PIL import Image
 
     img = Image.open(filename).convert("L")
     arr = np.array(img)
 
-    # 2. Normalisera (linjär normalisering mellan min och max i bilden)
+    # Normalize  to color map
     norm = mcolors.Normalize(vmin=arr.min(), vmax=arr.max())
-
-    # 3. Välj colormap
     cmap = plt.get_cmap("viridis")
-
-    # 4. Applicera colormap på den normaliserade datan
     colored = cmap(norm(arr))  # ger RGBA float i [0,1]
-
-    # 5. Lägg på alpha (t.ex. konstant 0.5)
     colored[..., 3] = alpha_val
-
-    # 6. Konvertera till 8-bit och spara som PNG
     colored_img = (colored * 255).astype(np.uint8)
     out = Image.fromarray(colored_img, mode="RGBA")
-
-    # Spara som PNG
     out.save(output_filename, "PNG")
 
 if __name__ == "__main__":
@@ -267,4 +248,3 @@ if __name__ == "__main__":
     dem = wbe.read_raster(filename)
 
     transform_epsg(dem, 3006, 4326)
-        
