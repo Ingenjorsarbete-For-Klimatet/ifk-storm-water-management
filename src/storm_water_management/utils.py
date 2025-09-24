@@ -143,6 +143,8 @@ def transform_epsg(dem, epsg_in: int = 5845, epsg_out: int = 4326):
         for col in range(dem.configs.columns):
             dem_transformed[row, col] = dem[row, col]
 
+    print(f"bounds: [{lower_lon}, {lower_lat}, {upper_lon}, {upper_lat}]")
+
     return dem_transformed
 
 
@@ -183,7 +185,7 @@ def saturated_upper_limit(dem, upper_limit: float = 1.0):
 
 
 def write_to_png(filename: str, output_filename: str, lower_limit: float = 0.1) -> None:
-    """Write dem file to png.
+    """Write dem file to png. Values lower than lower_limit is set to nan.
 
     Args:
         filename: input tif file
@@ -200,18 +202,54 @@ def write_to_png(filename: str, output_filename: str, lower_limit: float = 0.1) 
     # make a mask for transparent pixels
     mask = data < lower_limit
 
-    # Normalize values
+    # Normalize values and apply color map
     normed = (data - data.min()) / (data.max() - data.min())
     normed[mask] = np.nan
-
-    # Välj colormap från matplotlib
     cmap = plt.get_cmap("viridis")  # t.ex. "viridis", "terrain", "plasma"
-
-    # apply color map colormap -> RGBA (0–1 floats)
     rgba = cmap(normed)
     rgba = (rgba * 255).astype(np.uint8)
     rgba[..., 3] = np.where(mask, 0, 255)
 
-    # Save file
     img = Image.fromarray(rgba, mode="RGBA")
     img.save(output_filename)
+
+
+def write_to_png_alpha(
+    filename: str, output_filename: str, alpha_val: float = 0.75
+) -> None:
+    """Write dem file to png.
+
+    Args:
+        filename: input tif file
+        output_filename: output png file
+        alpha_val: alpha color
+    """
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from PIL import Image
+
+    img = Image.open(filename).convert("L")
+    arr = np.array(img)
+
+    # Normalize  to color map
+    norm = mcolors.Normalize(vmin=arr.min(), vmax=arr.max())
+    cmap = plt.get_cmap("viridis")
+    colored = cmap(norm(arr))  # ger RGBA float i [0,1]
+    colored[..., 3] = alpha_val
+    colored_img = (colored * 255).astype(np.uint8)
+    out = Image.fromarray(colored_img, mode="RGBA")
+    out.save(output_filename, "PNG")
+
+
+if __name__ == "__main__":
+    # write_to_png_alpha("/home/chris/repos/storm_temp/data/1m/63950_3150_25.tif", "elevation.png")
+
+    filename_path = "/home/chris/repos/storm_temp/data/1m"
+    filename = "63950_3150_25.tif"
+    wbe = WbEnvironment()
+    wbe.verbose = True
+    wbe.working_directory = filename_path
+    dem = wbe.read_raster(filename)
+
+    transform_epsg(dem, 3006, 4326)
