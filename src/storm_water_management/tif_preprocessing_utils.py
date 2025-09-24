@@ -42,10 +42,3 @@ def concat_tif(files: list, folder: str, output_filname: str) -> None:
             plt.show()
 
         src.close()
-
-
-if __name__ == "__main__":
-    path = "/home/chris/repos/storm_temp/data/1m"
-    filenames = ["63950_3150_25.tif", "63975_3150_25.tif"]
-    output_name = "meged.tif"
-    concat_tif(filenames, path, output_name)
