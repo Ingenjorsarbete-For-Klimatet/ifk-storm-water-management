@@ -44,5 +44,5 @@ there are some details to consider.
 
 - Build workflow, follow the guide in [dynamic badges](https://github.com/Schneegans/dynamic-badges-action).
 - To build docs, change `branch` in `github/workflows/github-action-docs.yaml`
-from `["SET_TO_MAIN"]` to `["main"]`. You also need to activate Pages under repo
-Settings/Pages.
+  from `["SET_TO_MAIN"]` to `["main"]`. You also need to activate Pages under repo
+  Settings/Pages.
