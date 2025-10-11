@@ -3,7 +3,8 @@
 ## Data
 
 The elevation data used in this repository is downloaded from **Lantmäteriet**.
-It consists of **raster elevation data** (preferably 1 m resolution) provided as **.tif files**.
+It consists of **raster elevation data** (preferably 1 m resolution) provided as
+**.tif files**.
 
 ## Pre-processing
 
@@ -13,7 +14,8 @@ the files must first be **merged**.
 To run script from terminal:
 
 <pre>
-python src/storm_water_management/tif_preprocessing_utils.py "Folder including tif-files to merge"
+python src/storm_water_management/tif_preprocessing_utils.py "Folder including
+tif-files to merge"
 </pre>
 
 Or import and run in Python
@@ -28,7 +30,7 @@ concat_tif_in_folder(folder)
 
 To perform the main analysis, run:
 
-<pre> 
+<pre>
 python src/storm_water_management/main.py "Path to file, e.g., <data/file.tif>"
 </pre>
 
