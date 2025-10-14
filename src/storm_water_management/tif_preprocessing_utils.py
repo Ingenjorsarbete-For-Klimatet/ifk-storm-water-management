@@ -14,7 +14,8 @@ def concat_tif_in_folder(folder: str, plot_merge: bool = True, output_filename: 
 
     Args:
         folder: folder including tif files to merge
-        plot_merge: plot merge
+        plot_merge: plot merge (True/False - default True)
+        output_filename: Filename of merged file (optional)
     """
     files = [f for f in os.listdir(folder) if f.lower().endswith(".tif")]
     if not files:
