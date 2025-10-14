@@ -9,7 +9,7 @@ from rasterio.merge import merge
 from rasterio.plot import show
 
 
-def concat_tif_in_folder(folder: str, plot_merge: bool = True) -> None:
+def concat_tif_in_folder(folder: str, plot_merge: bool = True, output_filename: str = "") -> None:
     """Concat tif files in folder.
 
     Args:
@@ -34,7 +34,8 @@ def concat_tif_in_folder(folder: str, plot_merge: bool = True) -> None:
     )
 
     folder_name = os.path.basename(os.path.normpath(folder))
-    output_filename = os.path.join(folder, f"{folder_name}.tif")
+    if len(output_filename)==0:
+        output_filename = os.path.join(folder, f"{folder_name}.tif")
 
     with rasterio.open(output_filename, "w", **out_meta) as dest:
         dest.write(mosaic)
