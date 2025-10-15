@@ -1,7 +1,11 @@
-"""Main function."""
+"""Main function for analysis."""
+
+import argparse
+import os
+import time
 
 import matplotlib.pyplot as plt
-from geojson_utils import write_geojson_polynomials_from_tif_to_file
+from geojson_utils import write_geojson_polygons_from_tif_to_file
 from utils import (
     get_tif_as_np_array,
     get_tif_from_np_array,
@@ -12,18 +16,22 @@ from utils import (
 )
 from whitebox_workflows import WbEnvironment, show
 
-filename_path = "/home/chris/repos/storm_temp/data/1m"
-filename = "63950_3150_25.tif"
 
+def main(filename: str) -> None:
+    """Main function.
 
-def main():
-    """Main function."""
+    Args:
+        filename: path to file
+    """
+    start = time.time()
+    filename_path = os.path.dirname(filename)
+    tif_filename = os.path.basename(filename)
     wbe = WbEnvironment()
     wbe.verbose = True
     wbe.working_directory = filename_path
-    dem = wbe.read_raster(filename)
+    dem = wbe.read_raster(tif_filename)
 
-    raster_as_array = get_tif_as_np_array(filename_path, filename)
+    raster_as_array = get_tif_as_np_array(filename)
     dem_from_array = get_tif_from_np_array(dem, raster_as_array)
     dem_from_array.configs.epsg_code = 3006
     info(dem_from_array)
@@ -31,6 +39,7 @@ def main():
     # Smooth DEM. Parameters need to be set to proper values.
     # dem_smoothed = wbe.feature_preserving_smoothing(dem_from_array, filter_size=11, normal_diff_threshold=10.0, iterations=3)
     dem_smoothed = dem_from_array
+
     # Fill depressions
     # dem_no_deps = wbe.fill_depressions_planchon_and_darboux(
     #    dem_smoothed, flat_increment=0.001
@@ -40,7 +49,6 @@ def main():
     depression_depth = wbe.raster_calculator(
         "('dem_no_deps'-'dem')", [dem_no_deps, dem_from_array]
     )
-    # wbe.write_raster(depression_depth, filename + 'depression_depth.tif')
 
     # Flow accumulation analysis
     # channel_threshold = 50000.0
@@ -70,14 +78,11 @@ def main():
         ax.legend()
         plt.show()
 
-    wbe.write_raster(depression_depth, filename[:-4] + "_depression_depth.tif")
-    write_geojson_polynomials_from_tif_to_file(
-        filename_path + "/" + filename[:-4] + "_depression_depth.tif"
-    )
+    wbe.write_raster(depression_depth, tif_filename[:-4] + "_depression_depth.tif")
+    write_geojson_polygons_from_tif_to_file(filename[:-4] + "_depression_depth.tif")
 
     write_to_png_bool = False
     if write_to_png_bool:
-        # prepare and save as png
         depression_depth_saturated = saturated_upper_limit(depression_depth)
         wbe.write_raster(depression_depth_saturated, "depression_depth_saturated.tif")
         write_to_png(
@@ -85,6 +90,17 @@ def main():
         )
         info(depression_depth_saturated)
 
+    end = time.time()
+    print(f"Total time: {end - start:.2f} s")
+
+
+def parse_and_run() -> None:
+    """Parse and run."""
+    parser = argparse.ArgumentParser(description="Storm water management analysis")
+    parser.add_argument("filename", help="File to analyze")
+    args = parser.parse_args()
+    main(args.filename)
+
 
 if __name__ == "__main__":
-    main()
+    parse_and_run()
