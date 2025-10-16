@@ -5,7 +5,10 @@ import os
 import time
 
 import matplotlib.pyplot as plt
-from geojson_utils import write_geojson_polygons_from_tif_to_file
+from geojson_utils import (
+    write_geojson_points_from_tif_to_file,
+    write_geojson_polygons_from_tif_to_file,
+)
 from utils import (
     get_tif_as_np_array,
     get_tif_from_np_array,
@@ -80,6 +83,7 @@ def main(filename: str) -> None:
 
     wbe.write_raster(depression_depth, tif_filename[:-4] + "_depression_depth.tif")
     write_geojson_polygons_from_tif_to_file(filename[:-4] + "_depression_depth.tif")
+    write_geojson_points_from_tif_to_file(filename[:-4] + "_depression_depth.tif")
 
     write_to_png_bool = False
     if write_to_png_bool:
