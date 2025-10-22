@@ -5,7 +5,10 @@ import os
 import time
 
 import matplotlib.pyplot as plt
-from geojson_utils import write_geojson_polygons_from_tif_to_file
+from geojson_utils import (
+    write_geojson_points_from_tif_to_file,
+    write_geojson_polygons_from_tif_to_file,
+)
 from utils import (
     get_tif_as_np_array,
     get_tif_from_np_array,
@@ -17,11 +20,17 @@ from utils import (
 from whitebox_workflows import WbEnvironment, show
 
 
-def main(filename: str) -> None:
+def main(
+    filename: str,
+    write_geojson_polygons: bool = True,
+    write_to_geojson_points: bool = False,
+) -> None:
     """Main function.
 
     Args:
         filename: path to file
+        write_geojson_polygons: write polygons to geojson file
+        write_to_geojson_points: write points to geojson file
     """
     start = time.time()
     filename_path = os.path.dirname(filename)
@@ -79,7 +88,12 @@ def main(filename: str) -> None:
         plt.show()
 
     wbe.write_raster(depression_depth, tif_filename[:-4] + "_depression_depth.tif")
-    write_geojson_polygons_from_tif_to_file(filename[:-4] + "_depression_depth.tif")
+
+    if write_geojson_polygons:
+        write_geojson_polygons_from_tif_to_file(filename[:-4] + "_depression_depth.tif")
+
+    if write_to_geojson_points:
+        write_geojson_points_from_tif_to_file(filename[:-4] + "_depression_depth.tif")
 
     write_to_png_bool = False
     if write_to_png_bool:
