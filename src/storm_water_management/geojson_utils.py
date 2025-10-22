@@ -23,7 +23,7 @@ def write_geojson_polygons_from_tif_to_file(
 
     # Define bins for depth
     bins = [0.1, 0.2, 0.5, 1.0, 1000.0]
-    labels = ["0.1-0.2 m", "0.2-0.5 m", "0.5-1 m", "1.0 <"]
+    labels = ["0.1-0.2 m", "0.2-0.5 m", "0.5-1 m", "1 <"]
     classified = np.digitize(img, bins, right=False).astype("int16")
 
     # Mask to ignore 0
