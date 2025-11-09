@@ -19,7 +19,15 @@ def concat_tif_in_folder(
         plot_merge: plot merge (True/False - default True)
         output_filename: Filename of merged file (optional)
     """
-    files = [f for f in os.listdir(folder) if f.lower().endswith(".tif")]
+    files = [
+        os.path.join(root, f)
+        for root, _, filenames in os.walk(folder)
+        for f in filenames
+        if f.lower().endswith(".tif")
+    ]
+
+    print(f"Number of files to merge: {len(files)}")
+
     if not files:
         raise ValueError(f"No .tif-files in: {folder}")
 
