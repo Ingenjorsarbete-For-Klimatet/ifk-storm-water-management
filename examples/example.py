@@ -7,10 +7,10 @@ class City:
     name: str
     longitudinal_position: float
     lateral_position: float
-    distance_limit_calculation: float = 5000
+    distance_limit_calculation: float = 4000
     distance_limit_results: float = 3000
 
-"""cities = [
+cities = [
     City("lilla_edet", 58.13230982643911, 12.124035673595857),
     City("henån", 58.23579871150094, 11.675051043473774),
     City("trollhättan", 58.28852773933211, 12.296952550648106),
@@ -27,21 +27,23 @@ class City:
     City("uddevalla", 58.3514080080046, 11.933445688117272),
     City("munkedal", 58.47044880677707, 11.678226890362856),
     City("stenungsund", 58.07150531530186, 11.850248960467628)
-]"""
+]
 
-cities = [
+"""cities = [
     City("gbg_north", 57.78186270404611, 11.959186965623235),
     City("gbg_center", 57.70550004878299, 11.939731567136613),
     City("gbg_south", 57.61938252109898, 11.889806099289737)
-]
+]"""
+
 
 folder_to_search_for_tif_files = "/home/chris/repos/data/elevation_data_sweden/lilla_edet"
 output_folder = "/home/chris/repos/data/results/"
 
 for city in cities:
-    do_preprocess = False
-    do_analysis = False
-    do_postprocessing = False
+    do_preprocess = True
+    do_analysis = True
+    do_postprocessing = True
+    do_crop = False
 
     x, y = tif_preprocessing_utils.get_sweref99_coordinate_from_wgs84(city.longitudinal_position, city.lateral_position)
 
@@ -62,11 +64,14 @@ for city in cities:
 
     # Post processing
     if do_postprocessing:
-        cropped_output_tif_filename = postprocess.crop_tif(analysis_tif_filename, x, y, city.distance_limit_results)
+        if do_crop:
+            cropped_output_tif_filename = postprocess.crop_tif(analysis_tif_filename, x, y, city.distance_limit_results)
+        else:
+            cropped_output_tif_filename = analysis_tif_filename
         postprocess.write_geojson_polygons_from_tif_to_file(cropped_output_tif_filename)
         print("Postprocess done.")
 
-    if True:
+    if False:
         import glob
         import geopandas as gpd
         # can be done faster by pyogrio or GeoParquet
