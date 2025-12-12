@@ -6,7 +6,7 @@ import pytest
 import rasterio
 from rasterio.transform import from_origin
 
-from storm_water_management.geojson_utils import (
+from storm_water_management.postprocess import (
     write_geojson_points_from_tif_to_file,
     write_geojson_polygons_from_tif_to_file,
 )

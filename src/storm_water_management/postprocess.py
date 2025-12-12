@@ -6,7 +6,7 @@ import numpy as np
 import rasterio
 from rasterio import features
 from shapely.geometry import Point, shape
-
+from rasterio.windows import from_bounds
 
 def write_geojson_polygons_from_tif_to_file(
     tif_filename, plot_polynomials: bool = False
@@ -84,3 +84,24 @@ def write_geojson_points_from_tif_to_file(
         gdf.plot(column="depth", cmap="viridis", legend=True, ax=ax)
         plt.title("Vattendjup")
         plt.show()
+
+def crop_tif(tif_path, x, y, distance_limit) -> str:
+    with rasterio.open(tif_path) as src:
+        left = x - distance_limit
+        right = x + distance_limit
+        bottom = y - distance_limit
+        top = y + distance_limit
+
+        window = from_bounds(left, bottom, right, top, src.transform)
+        data = src.read(window=window)
+        out_meta = src.meta.copy()
+        # kontrollera detta:
+        out_meta.update({"tiled": False})
+        out_meta.update({"blockxsize": data.shape[2],"blockysize": data.shape[1]})
+        out_meta.update({"compress": "lzw"})
+
+        output_tif_filename = tif_path[:-4] + "_cropped.tif"
+        with rasterio.open(output_tif_filename, "w", **out_meta) as dst:
+            dst.write(data)
+
+    return output_tif_filename
