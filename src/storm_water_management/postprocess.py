@@ -94,13 +94,24 @@ def crop_tif(tif_path, x, y, distance_limit) -> str:
 
         window = from_bounds(left, bottom, right, top, src.transform)
         data = src.read(window=window)
+
+        transform = src.window_transform(window)
+
         out_meta = src.meta.copy()
-        # kontrollera detta:
-        out_meta.update({"tiled": False})
-        out_meta.update({"blockxsize": data.shape[2],"blockysize": data.shape[1]})
-        out_meta.update({"compress": "lzw"})
+        out_meta.update({
+            "height": data.shape[1],
+            "width": data.shape[2],
+            "count": data.shape[0],
+            "transform": transform,
+            "compress": "lzw",
+            "tiled": False
+        })
+
+        out_meta.pop("blockxsize", None)
+        out_meta.pop("blockysize", None)
 
         output_tif_filename = tif_path[:-4] + "_cropped.tif"
+
         with rasterio.open(output_tif_filename, "w", **out_meta) as dst:
             dst.write(data)
 
