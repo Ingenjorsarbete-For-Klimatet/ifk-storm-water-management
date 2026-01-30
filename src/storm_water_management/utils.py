@@ -178,16 +178,18 @@ def write_to_png_alpha(
     out = Image.fromarray(colored_img, mode="RGBA")
     out.save(output_filename, "PNG")
 
+
 def get_control_values(dem, pixel_size=1):
-    area = pixel_size*pixel_size
+    area = pixel_size * pixel_size
     number_of_filled_cells = 0
     total_water_volume = 0
     for row in range(dem.configs.rows):
         for col in range(dem.configs.columns):
             if dem[row, col] > 0:
                 number_of_filled_cells += 1
-                total_water_volume += dem[row, col]*area
+                total_water_volume += dem[row, col] * area
     return number_of_filled_cells, total_water_volume
+
 
 if __name__ == "__main__":
     # write_to_png_alpha("/home/chris/repos/storm_temp/data/1m/63950_3150_25.tif", "elevation.png")

@@ -4,16 +4,18 @@ import os
 import time
 
 import matplotlib.pyplot as plt
+from whitebox_workflows import WbEnvironment, show
+
 from storm_water_management.utils import (
+    get_control_values,
     get_tif_as_np_array,
     get_tif_from_np_array,
     info,
     saturated_upper_limit,
     transform_epsg,
     write_to_png,
-    get_control_values
 )
-from whitebox_workflows import WbEnvironment, show
+
 
 def do_analysis(
     filename: str,
@@ -58,7 +60,6 @@ def do_analysis(
     # wbe.write_raster(flow_accum, filename + 'flow_accum.tif'))
 
     depression_depth = transform_epsg(depression_depth)
-    
 
     # Plot depression filling
     plot_depression = False

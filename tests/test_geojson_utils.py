@@ -48,9 +48,9 @@ def test_geojson_output_created(small_tif):
 
     write_geojson_polygons_from_tif_to_file(str(small_tif))
 
-    assert out_path.exists(), (
-        f"GeoJSON file should have been created. Out path: {out_path}"
-    )
+    assert (
+        out_path.exists()
+    ), f"GeoJSON file should have been created. Out path: {out_path}"
     gdf = gpd.read_file(out_path)
     assert not gdf.empty, "GeoDataFrame should not be empty."
     assert "depth_class" in gdf.columns, "Missing depth_class column."
@@ -64,9 +64,9 @@ def test_geojson_points_output_created(small_tif):
 
     write_geojson_points_from_tif_to_file(str(small_tif))
 
-    assert out_path.exists(), (
-        f"GeoJSON file should have been created. Out path: {out_path}"
-    )
+    assert (
+        out_path.exists()
+    ), f"GeoJSON file should have been created. Out path: {out_path}"
     gdf = gpd.read_file(out_path)
     assert not gdf.empty, "GeoDataFrame should not be empty."
     assert "depth" in gdf.columns, "Missing depth column."

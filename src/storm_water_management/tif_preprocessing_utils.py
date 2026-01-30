@@ -3,16 +3,20 @@
 import argparse
 import os
 
+import geopandas as gpd
 import matplotlib.pyplot as plt
 import rasterio
+from pyproj import Transformer
 from rasterio.merge import merge
 from rasterio.plot import show
 from shapely.geometry import Polygon
-import geopandas as gpd
-from pyproj import Transformer
 
-def concat_tif_in_folder(files: list,
-    folder: str, output_filename: str, plot_merge: bool = False, 
+
+def concat_tif_in_folder(
+    files: list,
+    folder: str,
+    output_filename: str,
+    plot_merge: bool = False,
 ) -> None:
     """Concat tif files in folder.
 
@@ -21,12 +25,12 @@ def concat_tif_in_folder(files: list,
         plot_merge: plot merge (True/False - default True)
         output_filename: Filename of merged file (optional)
     """
-    #files = get_all_tif_files_recursively(folder)
+    # files = get_all_tif_files_recursively(folder)
 
     print(f"Number of files to merge: {len(files)}")
 
     if not files:
-        raise ValueError(f"No .tif-files in list")
+        raise ValueError("No .tif-files in list")
 
     src_files = [rasterio.open(os.path.join(folder, f)) for f in files]
 
@@ -61,6 +65,7 @@ def concat_tif_in_folder(files: list,
 
     return output_filename
 
+
 def get_all_tif_files_recursively(folder: str) -> list:
     """Get all tif files in folder recursively
 
@@ -77,15 +82,20 @@ def get_all_tif_files_recursively(folder: str) -> list:
     ]
     return files
 
-def is_tif_coordinates_closer_then_limit(x: float, y: float, bounds, limit: float) -> bool:
+
+def is_tif_coordinates_closer_then_limit(
+    x: float, y: float, bounds, limit: float
+) -> bool:
     dx = max(bounds.left - x, 0, x - bounds.right)
     dy = max(bounds.bottom - y, 0, y - bounds.top)
     return (dx < limit) & (dy < limit)
 
+
 def get_sweref99_coordinate_from_wgs84(lon: float, lat: float) -> tuple:
     transformer = Transformer.from_crs("EPSG:4326", "EPSG:5845", always_xy=True)
     x, y = transformer.transform(lat, lon)
-    return x,y
+    return x, y
+
 
 def filter_files_by_distance(files: list, x: float, y: float, limit: float) -> list:
 
@@ -98,7 +108,8 @@ def filter_files_by_distance(files: list, x: float, y: float, limit: float) -> l
 
     return filtered_files
 
-def save_and_plot_area_of_all_files_in_folder(files,x, y) -> None:
+
+def save_and_plot_area_of_all_files_in_folder(files, x, y) -> None:
 
     polygons = []
 
@@ -106,26 +117,26 @@ def save_and_plot_area_of_all_files_in_folder(files,x, y) -> None:
     for f in files:
         with rasterio.open(f) as src:
             bounds = src.bounds
-            poly = Polygon([
-                (bounds.left,  bounds.bottom),
-                (bounds.left,  bounds.top),
-                (bounds.right, bounds.top),
-                (bounds.right, bounds.bottom),
-                (bounds.left,  bounds.bottom)
-            ])
-            polygons.append({
-                "geometry": poly,
-                "file": f
-            })
-    
+            poly = Polygon(
+                [
+                    (bounds.left, bounds.bottom),
+                    (bounds.left, bounds.top),
+                    (bounds.right, bounds.top),
+                    (bounds.right, bounds.bottom),
+                    (bounds.left, bounds.bottom),
+                ]
+            )
+            polygons.append({"geometry": poly, "file": f})
+
     print(f"Number of tif-files: {len(files)}")
     gdf = gpd.GeoDataFrame(polygons, crs=src.crs)  # use sweref99
     gdf.to_file("tiff_bounds.geojson", driver="GeoJSON")
-    
-    ax = gdf.plot(edgecolor="red", facecolor="none", figsize=(8,8))
+
+    ax = gdf.plot(edgecolor="red", facecolor="none", figsize=(8, 8))
     ax.set_title("TIFF File Extents")
-    ax.plot([x],[y],"o")
+    ax.plot([x], [y], "o")
     plt.show()
+
 
 def parse_and_run() -> None:
     """Parse and run."""

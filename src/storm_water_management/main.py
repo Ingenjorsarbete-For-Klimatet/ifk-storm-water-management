@@ -10,13 +10,13 @@ from postprocess import (
     write_geojson_polygons_from_tif_to_file,
 )
 from utils import (
+    get_control_values,
     get_tif_as_np_array,
     get_tif_from_np_array,
     info,
     saturated_upper_limit,
     transform_epsg,
     write_to_png,
-    get_control_values
 )
 from whitebox_workflows import WbEnvironment, show
 
@@ -68,7 +68,6 @@ def main(
     # wbe.write_raster(flow_accum, filename + 'flow_accum.tif'))
 
     depression_depth = transform_epsg(depression_depth)
-    
 
     # Plot depression filling
     plot_depression = False

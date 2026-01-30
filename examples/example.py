@@ -1,6 +1,8 @@
 import os
-from storm_water_management import tif_preprocessing_utils, analysis, postprocess
 from dataclasses import dataclass
+
+from storm_water_management import analysis, postprocess, tif_preprocessing_utils
+
 
 @dataclass
 class City:
@@ -9,6 +11,7 @@ class City:
     lateral_position: float
     distance_limit_calculation: float = 4000
     distance_limit_results: float = 3000
+
 
 cities = [
     City("lilla_edet", 58.13230982643911, 12.124035673595857),
@@ -26,7 +29,7 @@ cities = [
     City("alingsås", 57.93048034773409, 12.540678237239264),
     City("uddevalla", 58.3514080080046, 11.933445688117272),
     City("munkedal", 58.47044880677707, 11.678226890362856),
-    City("stenungsund", 58.07150531530186, 11.850248960467628)
+    City("stenungsund", 58.07150531530186, 11.850248960467628),
 ]
 
 """cities = [
@@ -36,7 +39,9 @@ cities = [
 ]"""
 
 
-folder_to_search_for_tif_files = "/home/chris/repos/data/elevation_data_sweden/lilla_edet"
+folder_to_search_for_tif_files = (
+    "/home/chris/repos/data/elevation_data_sweden/lilla_edet"
+)
 output_folder = "/home/chris/repos/data/results/"
 
 for city in cities:
@@ -45,16 +50,24 @@ for city in cities:
     do_postprocessing = True
     do_crop = False
 
-    x, y = tif_preprocessing_utils.get_sweref99_coordinate_from_wgs84(city.longitudinal_position, city.lateral_position)
+    x, y = tif_preprocessing_utils.get_sweref99_coordinate_from_wgs84(
+        city.longitudinal_position, city.lateral_position
+    )
 
     # Merge all tif files that are within distance_limit_calculation (= half width of rectangle).
     if do_preprocess:
         filename = city.name + ".tif"
         output_filename = os.path.join(output_folder, filename)
-        files_in_folder = tif_preprocessing_utils.get_all_tif_files_recursively(folder_to_search_for_tif_files)
-        file_list = tif_preprocessing_utils.filter_files_by_distance(files_in_folder, x,y, city.distance_limit_calculation)
-        #tif_preprocessing_utils.save_and_plot_area_of_all_files_in_folder(file_list, x, y)
-        tif_preprocessing_utils.concat_tif_in_folder(file_list, folder_to_search_for_tif_files, output_filename)
+        files_in_folder = tif_preprocessing_utils.get_all_tif_files_recursively(
+            folder_to_search_for_tif_files
+        )
+        file_list = tif_preprocessing_utils.filter_files_by_distance(
+            files_in_folder, x, y, city.distance_limit_calculation
+        )
+        # tif_preprocessing_utils.save_and_plot_area_of_all_files_in_folder(file_list, x, y)
+        tif_preprocessing_utils.concat_tif_in_folder(
+            file_list, folder_to_search_for_tif_files, output_filename
+        )
         print("Preprocess done.")
 
     # Analyze
@@ -65,7 +78,9 @@ for city in cities:
     # Post processing
     if do_postprocessing:
         if do_crop:
-            cropped_output_tif_filename = postprocess.crop_tif(analysis_tif_filename, x, y, city.distance_limit_results)
+            cropped_output_tif_filename = postprocess.crop_tif(
+                analysis_tif_filename, x, y, city.distance_limit_results
+            )
         else:
             cropped_output_tif_filename = analysis_tif_filename
         postprocess.write_geojson_polygons_from_tif_to_file(cropped_output_tif_filename)
@@ -73,9 +88,11 @@ for city in cities:
 
     if False:
         import glob
+
         import geopandas as gpd
+
         # can be done faster by pyogrio or GeoParquet
-        
+
         files = glob.glob(os.path.join(output_folder, "*.geojson"))
         gdfs = [gpd.read_file(f) for f in files]
         merged = gpd.pd.concat(gdfs, ignore_index=True)
