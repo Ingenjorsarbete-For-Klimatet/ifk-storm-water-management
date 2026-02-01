@@ -5,8 +5,6 @@ import pytest
 import rasterio
 from rasterio.transform import from_origin
 
-from storm_water_management.tif_preprocessing_utils import concat_tif_in_folder
-
 
 @pytest.fixture
 def temp_tif_folder(tmp_path):
