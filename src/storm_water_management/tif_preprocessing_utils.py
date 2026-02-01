@@ -22,8 +22,9 @@ def concat_tif_in_folder(
 
     Args:
         files: list of tif files to merge
+        folder: folder
+        output_filename: Filename of merged file
         plot_merge: plot merge (True/False - default True)
-        output_filename: Filename of merged file (optional)
     """
     # files = get_all_tif_files_recursively(folder)
 
@@ -67,7 +68,7 @@ def concat_tif_in_folder(
 
 
 def get_all_tif_files_recursively(folder: str) -> list:
-    """Get all tif files in folder recursively
+    """Get all tif files in folder recursively.
 
     Args:
         folder: folder to search in.
@@ -86,19 +87,46 @@ def get_all_tif_files_recursively(folder: str) -> list:
 def is_tif_coordinates_closer_then_limit(
     x: float, y: float, bounds, limit: float
 ) -> bool:
+    """Check if tif file is limit close to (x,y).
+
+    Args:
+        x: x coord
+        y: y coord
+        bounds: bounds of tif
+        limit: disance from mid point
+    Returns:
+        True if tif limit close to (x,y)
+    """
     dx = max(bounds.left - x, 0, x - bounds.right)
     dy = max(bounds.bottom - y, 0, y - bounds.top)
     return (dx < limit) & (dy < limit)
 
 
 def get_sweref99_coordinate_from_wgs84(lon: float, lat: float) -> tuple:
+    """Get sweref99 coordinate from wgs84 coordinate.
+
+    Args:
+        lon: longitudinal position
+        lat: lateral position
+    Returns:
+        sweref99 coordinate
+    """
     transformer = Transformer.from_crs("EPSG:4326", "EPSG:5845", always_xy=True)
     x, y = transformer.transform(lat, lon)
     return x, y
 
 
 def filter_files_by_distance(files: list, x: float, y: float, limit: float) -> list:
+    """Filter files by distance.
 
+    Args:
+        files: list of tif files
+        x: x coord
+        y: y coord
+        limit: disance from mid point
+    Returns:
+        list of files
+    """
     filtered_files = []
     for f in files:
         with rasterio.open(f) as src:
@@ -110,7 +138,13 @@ def filter_files_by_distance(files: list, x: float, y: float, limit: float) -> l
 
 
 def save_and_plot_area_of_all_files_in_folder(files, x, y) -> None:
+    """Save and plot area off files.
 
+    Args:
+        files: list of tif files
+        x: x coord to plot
+        y: y coord to plot
+    """
     polygons = []
 
     # create polygons of file bounds

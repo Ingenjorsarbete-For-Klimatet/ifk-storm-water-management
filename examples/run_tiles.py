@@ -1,3 +1,5 @@
+"""Example on how to run from files."""
+
 import os
 
 import rasterio

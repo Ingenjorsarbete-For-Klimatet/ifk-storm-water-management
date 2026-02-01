@@ -1,3 +1,5 @@
+"""Example on how to run from from coordinates."""
+
 import os
 from dataclasses import dataclass
 
@@ -6,6 +8,8 @@ from storm_water_management import analysis, postprocess, tif_preprocessing_util
 
 @dataclass
 class City:
+    """City dataclass."""
+
     name: str
     longitudinal_position: float
     lateral_position: float

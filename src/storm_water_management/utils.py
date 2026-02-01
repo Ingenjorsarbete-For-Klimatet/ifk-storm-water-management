@@ -180,6 +180,12 @@ def write_to_png_alpha(
 
 
 def get_control_values(dem, pixel_size=1):
+    """Get number of filled cells and volume.
+
+    Args:
+        dem: raster
+        pixel_size: size of cell
+    """
     area = pixel_size * pixel_size
     number_of_filled_cells = 0
     total_water_volume = 0
