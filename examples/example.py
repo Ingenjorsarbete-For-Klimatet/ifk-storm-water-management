@@ -5,6 +5,10 @@ from dataclasses import dataclass
 
 from storm_water_management import analysis, postprocess, tif_preprocessing_utils
 
+folder_to_search_for_tif_files = (
+    "/home/chris/repos/data/elevation_data_sweden/lilla_edet"
+)
+output_folder = "/home/chris/repos/data/results/"
 
 @dataclass
 class City:
@@ -41,12 +45,6 @@ cities = [
     City("gbg_center", 57.70550004878299, 11.939731567136613),
     City("gbg_south", 57.61938252109898, 11.889806099289737)
 ]"""
-
-
-folder_to_search_for_tif_files = (
-    "/home/chris/repos/data/elevation_data_sweden/lilla_edet"
-)
-output_folder = "/home/chris/repos/data/results/"
 
 for city in cities:
     do_preprocess = True

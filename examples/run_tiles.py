@@ -6,6 +6,10 @@ import rasterio
 
 from storm_water_management import analysis, postprocess, tif_preprocessing_utils
 
+# Distance from mid point of bbox for inclusion of other bboxs.
+include_tile_distance = 2000
+
+# Files for depression depth analysis.
 tifs_to_explore = [
     "/home/chris/repos/data/elevation_data_sweden/goteborg/639_31_2550/63925_3150_25.tif",
     "/home/chris/repos/data/elevation_data_sweden/goteborg/639_31_2525/63925_3125_25.tif",
@@ -31,7 +35,6 @@ for filename in tifs_to_explore:
         center_x = (b.left + b.right) / 2
         center_y = (b.bottom + b.top) / 2
 
-    include_tile_distance = 2000
     output_filename = os.path.join(
         output_folder,
         f"incl_distance_{include_tile_distance}_" + os.path.basename(filename),

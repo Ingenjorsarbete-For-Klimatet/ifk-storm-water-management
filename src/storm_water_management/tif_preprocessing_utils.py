@@ -84,7 +84,7 @@ def get_all_tif_files_recursively(folder: str) -> list:
     return files
 
 
-def is_tif_coordinates_closer_then_limit(
+def is_tif_coordinates_closer_than_limit(
     x: float, y: float, bounds, limit: float
 ) -> bool:
     """Check if tif file is limit close to (x,y).
@@ -131,7 +131,7 @@ def filter_files_by_distance(files: list, x: float, y: float, limit: float) -> l
     for f in files:
         with rasterio.open(f) as src:
             bounds = src.bounds
-            if is_tif_coordinates_closer_then_limit(x, y, bounds, limit):
+            if is_tif_coordinates_closer_than_limit(x, y, bounds, limit):
                 filtered_files.append(f)
 
     return filtered_files
