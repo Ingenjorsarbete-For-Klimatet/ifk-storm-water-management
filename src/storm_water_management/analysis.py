@@ -1,15 +1,12 @@
 """Main function for analysis."""
 
-import argparse
 import os
 import time
 
 import matplotlib.pyplot as plt
-from postprocess import (
-    write_geojson_points_from_tif_to_file,
-    write_geojson_polygons_from_tif_to_file,
-)
-from utils import (
+from whitebox_workflows import WbEnvironment, show
+
+from storm_water_management.utils import (
     get_control_values,
     get_tif_as_np_array,
     get_tif_from_np_array,
@@ -18,20 +15,15 @@ from utils import (
     transform_epsg,
     write_to_png,
 )
-from whitebox_workflows import WbEnvironment, show
 
 
-def main(
+def do_analysis(
     filename: str,
-    write_geojson_polygons: bool = True,
-    write_to_geojson_points: bool = False,
 ) -> None:
     """Main function.
 
     Args:
         filename: path to file
-        write_geojson_polygons: write polygons to geojson file
-        write_to_geojson_points: write points to geojson file
     """
     start = time.time()
     filename_path = os.path.dirname(filename)
@@ -90,13 +82,8 @@ def main(
         ax.legend()
         plt.show()
 
-    wbe.write_raster(depression_depth, tif_filename[:-4] + "_depression_depth.tif")
-
-    if write_geojson_polygons:
-        write_geojson_polygons_from_tif_to_file(filename[:-4] + "_depression_depth.tif")
-
-    if write_to_geojson_points:
-        write_geojson_points_from_tif_to_file(filename[:-4] + "_depression_depth.tif")
+    output_filename = tif_filename[:-4] + "_depression_depth.tif"
+    wbe.write_raster(depression_depth, output_filename)
 
     write_to_png_bool = False
     if write_to_png_bool:
@@ -111,15 +98,4 @@ def main(
     print(f"Total time: {end - start:.2f} s")
     print("number_of_filled_cells: ", number_of_filled_cells)
     print("total water volume: ", total_volume)
-
-
-def parse_and_run() -> None:
-    """Parse and run."""
-    parser = argparse.ArgumentParser(description="Storm water management analysis")
-    parser.add_argument("filename", help="File to analyze")
-    args = parser.parse_args()
-    main(args.filename)
-
-
-if __name__ == "__main__":
-    parse_and_run()
+    return os.path.join(filename_path, output_filename)

@@ -5,8 +5,6 @@ import pytest
 import rasterio
 from rasterio.transform import from_origin
 
-from storm_water_management.tif_preprocessing_utils import concat_tif_in_folder
-
 
 @pytest.fixture
 def temp_tif_folder(tmp_path):
@@ -33,30 +31,3 @@ def temp_tif_folder(tmp_path):
             dst.write(data, 1)
 
     return folder
-
-
-def test_concat_creates_file(temp_tif_folder):
-    """Test att concat_tif_in_folder skapar en TIFF-fil."""
-    concat_tif_in_folder(str(temp_tif_folder), plot_merge=False)
-    output_file = temp_tif_folder / "tifs.tif"
-    assert output_file.exists(), "Merged TIFF file should have been created."
-
-    # Check size
-    with rasterio.open(output_file) as src:
-        merged_data = src.read(1)
-
-    individual_file = temp_tif_folder / "file_0.tif"
-    with rasterio.open(individual_file) as src:
-        single_data = src.read(1)
-
-    assert merged_data.shape[0] >= single_data.shape[0]
-    assert merged_data.shape[1] >= single_data.shape[1]
-
-
-def test_no_tif_files(tmp_path):
-    """Test empty folder."""
-    empty_folder = tmp_path / "empty"
-    empty_folder.mkdir()
-
-    with pytest.raises(ValueError, match="No .tif-files in:"):
-        concat_tif_in_folder(str(empty_folder))
