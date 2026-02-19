@@ -87,7 +87,7 @@ def write_geojson_points_from_tif_to_file(
         plt.show()
 
 
-def crop_tif(tif_path, x, y, distance_limit) -> str:
+def crop_tif(tif_path, x, y, distance_limit, output_filename: str = "") -> str:
     """Crop tif.
 
     Args:
@@ -95,6 +95,7 @@ def crop_tif(tif_path, x, y, distance_limit) -> str:
         x: x coord
         y: y coord
         distance_limit: distance to crop from (x,y)
+        output_filename: output filename
 
     Returns:
         New file path
@@ -125,7 +126,10 @@ def crop_tif(tif_path, x, y, distance_limit) -> str:
         out_meta.pop("blockxsize", None)
         out_meta.pop("blockysize", None)
 
-        output_tif_filename = tif_path[:-4] + "_cropped.tif"
+        if output_filename:
+            output_tif_filename = output_filename
+        else:
+            output_tif_filename = tif_path[:-4] + "_cropped.tif"
 
         with rasterio.open(output_tif_filename, "w", **out_meta) as dst:
             dst.write(data)

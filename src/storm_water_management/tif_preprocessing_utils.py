@@ -46,9 +46,9 @@ def concat_tif_in_folder(
         }
     )
 
-    folder_name = os.path.basename(os.path.normpath(folder))
-    if len(output_filename) == 0:
-        output_filename = os.path.join(folder, f"{folder_name}.tif")
+    # folder_name = os.path.basename(os.path.normpath(folder))
+    # if len(output_filename) == 0:
+    #    output_filename = os.path.join(folder, f"{folder_name}.tif")
 
     with rasterio.open(output_filename, "w", **out_meta) as dest:
         dest.write(mosaic)
