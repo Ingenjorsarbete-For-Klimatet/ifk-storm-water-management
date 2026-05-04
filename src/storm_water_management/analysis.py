@@ -18,29 +18,37 @@ from storm_water_management.utils import (
 
 
 def do_analysis(
-    filename: str,
+    filename: str, do_calculation_of_control_values=False, rewrite_tif=True
 ) -> None:
     """Main function.
 
     Args:
         filename: path to file
+        do_calculation_of_control_values: whether to calculate control values (number of filled cells and total volume)
+        rewrite_tif: whether to rewrite tif to array and back to raster before analysis
     """
     start = time.time()
     filename_path = os.path.dirname(filename)
     tif_filename = os.path.basename(filename)
     wbe = WbEnvironment()
-    wbe.verbose = True
+    wbe.verbose = False
     wbe.working_directory = filename_path
     dem = wbe.read_raster(tif_filename)
+    dem.configs.epsg_code = 3006
 
-    raster_as_array = get_tif_as_np_array(filename)
-    dem_from_array = get_tif_from_np_array(dem, raster_as_array)
-    dem_from_array.configs.epsg_code = 3006
-    info(dem_from_array)
+    if rewrite_tif:
+        raster_as_array = get_tif_as_np_array(filename)
+        dem_from_array = get_tif_from_np_array(dem, raster_as_array)
+        dem_from_array.configs.epsg_code = 3006
+        dem_smoothed = dem_from_array
+    else:
+        dem_smoothed = dem
+
+    # info(dem_from_array)
 
     # Smooth DEM. Parameters need to be set to proper values.
     # dem_smoothed = wbe.feature_preserving_smoothing(dem_from_array, filter_size=11, normal_diff_threshold=10.0, iterations=3)
-    dem_smoothed = dem_from_array
+    # dem_smoothed = dem
 
     # Fill depressions
     # dem_no_deps = wbe.fill_depressions_planchon_and_darboux(
@@ -49,10 +57,8 @@ def do_analysis(
     # dem_no_deps = wbe.fill_depressions(dem_smoothed, flat_increment=0.001)
     dem_no_deps = wbe.fill_depressions_wang_and_liu(dem_smoothed, flat_increment=0.001)
     depression_depth = wbe.raster_calculator(
-        "('dem_no_deps'-'dem')", [dem_no_deps, dem_from_array]
+        "('dem_no_deps'-'dem')", [dem_no_deps, dem_smoothed]
     )
-
-    number_of_filled_cells, total_volume = get_control_values(depression_depth)
 
     # Flow accumulation analysis
     # channel_threshold = 50000.0
@@ -95,7 +101,10 @@ def do_analysis(
         info(depression_depth_saturated)
 
     end = time.time()
-    print(f"Total time: {end - start:.2f} s")
-    print("number_of_filled_cells: ", number_of_filled_cells)
-    print("total water volume: ", total_volume)
+    print(f"Analysis total time: {end - start:.2f} s")
+
+    if do_calculation_of_control_values:
+        number_of_filled_cells, total_volume = get_control_values(depression_depth)
+        print("number_of_filled_cells: ", number_of_filled_cells)
+        print("total water volume: ", total_volume)
     return os.path.join(filename_path, output_filename)

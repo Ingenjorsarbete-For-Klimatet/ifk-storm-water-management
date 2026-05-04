@@ -80,8 +80,6 @@ def transform_epsg(dem, epsg_in: int = 5845, epsg_out: int = 4326):
         for col in range(dem.configs.columns):
             dem_transformed[row, col] = dem[row, col]
 
-    print(f"bounds: [{lower_lon}, {lower_lat}, {upper_lon}, {upper_lat}]")
-
     return dem_transformed
 
 
