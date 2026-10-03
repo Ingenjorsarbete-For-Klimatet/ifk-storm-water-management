@@ -54,7 +54,7 @@ for filename in tifs_to_explore:
 
     # Analyze
     if do_analysis:
-        analysis_tif_filename = analysis.do_analysis(output_filename)
+        analysis_tif_filename = analysis.do_analysis(output_filename, do_calculation_of_control_values=False, rewrite_tif=False)
         print("Analysis done.")
 
     # Post processing
@@ -62,5 +62,5 @@ for filename in tifs_to_explore:
         cropped_output_tif_filename = postprocess.crop_tif(
             analysis_tif_filename, center_x, center_y, 2500 / 2
         )
-        postprocess.write_geojson_polygons_from_tif_to_file(cropped_output_tif_filename)
+        postprocess.write_geojson_polygons_from_tif_to_file(cropped_output_tif_filename, output_format="FlatGeobuf")
         print("Postprocess done.")

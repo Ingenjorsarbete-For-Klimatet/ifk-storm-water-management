@@ -10,17 +10,23 @@ from shapely.geometry import Point, shape
 
 
 def write_geojson_polygons_from_tif_to_file(
-    tif_filename, plot_polynomials: bool = False
+    tif_filename,
+    plot_polynomials: bool = False,
+    output_format: str = "GeoJSON",
+    apply_dissolve: bool = False,
 ) -> None:
     """Write tif file to geojson polygons file.
 
     Args:
         tif_filename: input tif file
         plot_polynomials: plot polynomials
+        output_format: output format, either "GeoJSON" or "FlatGeobuf"
+        apply_dissolve: apply disolve on output
     """
     with rasterio.open(tif_filename) as src:
         img = src.read(1).astype(float)
         transform = src.transform
+        crs = src.crs
 
     # Define bins for depth
     bins = [0.1, 0.2, 0.5, 1.0, 1000.0]
@@ -30,21 +36,35 @@ def write_geojson_polygons_from_tif_to_file(
     # Mask to ignore 0
     mask = img > 0
 
-    # Extract polynomials
-    results = (
-        {"properties": {"class": labels[int(val) - 1]}, "geometry": s}
-        for s, val in features.shapes(classified, mask=mask, transform=transform)
-        if int(val) > 0 and int(val) <= len(labels)
-    )
-
+    # Extract polygons and build geodataframe directly
     geoms = []
     vals = []
-    for feat in results:
-        geoms.append(shape(feat["geometry"]))
-        vals.append(feat["properties"]["class"])
-    gdf = gpd.GeoDataFrame({"depth_class": vals}, geometry=geoms, crs=src.crs)
+
+    for s, val in features.shapes(classified, mask=mask, transform=transform):
+        val = int(val)
+        if 0 < val <= len(labels):
+            geoms.append(shape(s))
+            vals.append(labels[val - 1])
+
+    gdf = gpd.GeoDataFrame({"depth_class": vals}, geometry=geoms, crs=crs)
+
+    # Write file with specified format
+    file_ext = "fgb" if output_format == "FlatGeobuf" else "geojson"
+
+    remove_small_polygons = False
+    if remove_small_polygons:
+        min_area = 1
+        referens = gdf.union_all()
+        mask_large_areas = gdf.geometry.area > min_area
+        mask_within = gdf.geometry.within(referens)
+        gdf = gdf[mask_large_areas | mask_within]
+
+    if apply_dissolve:
+        gdf = gdf.dissolve(by="depth_class")
+        gdf = gdf[gdf.geometry.notna()]
+
     gdf = gdf.to_crs(epsg=4326)
-    gdf.to_file(tif_filename[:-4] + "_polygons" + ".geojson", driver="GeoJSON")
+    gdf.to_file(tif_filename[:-4] + f"_polygons.{file_ext}", driver=output_format)
 
     if plot_polynomials:
         fig, ax = plt.subplots(figsize=(8, 8))
