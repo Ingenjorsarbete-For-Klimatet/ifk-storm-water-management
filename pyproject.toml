@@ -21,6 +21,7 @@ dependencies = [
     "whitebox==2.3.6",
     "shapely==2.1.1",
     "rasterio==1.4.3",
+    "scipy",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +35,7 @@ doc = [
     "mkdocs-material ~= 8.5",
     "mkdocstrings[python] ~= 0.19",
 ]
+swmm = ["pyswmm>=2.2,<3"]
 dev = [
     "ifk-storm-water-management[lint]",
     "ifk-storm-water-management[type]",
