@@ -7,6 +7,7 @@ from rasterio.transform import from_origin
 
 from storm_water_management.storm_scenario import (
     simulate_basin_storage_spill,
+    write_basin_network_outputs,
     write_basin_storage_spill_outputs,
 )
 
@@ -199,3 +200,57 @@ def test_basin_writer_creates_aligned_geotiffs_and_csv(tmp_path):
         assert ponding.read(1)[3, 3] == pytest.approx(2.0)
         assert basin_ids.read(1)[3, 3] == 1
     assert "capacity_m3" in csv_path.read_text(encoding="utf-8")
+
+
+def test_basin_network_writer_needs_no_rainfall_or_ponding_output(tmp_path):
+    """Preparation writes PySWMM network inputs without a static event result."""
+    dem = np.full((7, 7), 5.0, dtype=np.float32)
+    dem[3, 2] = 2.0
+    dem[3, 3] = 0.0
+    depression = np.zeros_like(dem)
+    depression[3, 3] = 2.0
+    pointer = np.zeros_like(dem)
+    pointer[3, 3] = 2
+    accumulation = np.ones_like(dem)
+    accumulation[3, 3] = 100.0
+    profile = {
+        "driver": "GTiff",
+        "height": 7,
+        "width": 7,
+        "count": 1,
+        "dtype": "float32",
+        "crs": "EPSG:3006",
+        "transform": from_origin(0, 7, 1, 1),
+        "nodata": -9999.0,
+    }
+    inputs = {
+        "dem": dem,
+        "depression": depression,
+        "pointer": pointer,
+        "area": accumulation,
+    }
+    paths = {}
+    for name, values in inputs.items():
+        paths[name] = tmp_path / f"{name}.tif"
+        with rasterio.open(paths[name], "w", **profile) as destination:
+            destination.write(values, 1)
+
+    ids_path = tmp_path / "basin_ids.tif"
+    summary_path = tmp_path / "basin_network.csv"
+    summaries = write_basin_network_outputs(
+        paths["dem"],
+        paths["depression"],
+        paths["pointer"],
+        paths["area"],
+        ids_path,
+        summary_path,
+        minimum_basin_area_m2=1.0,
+    )
+
+    assert len(summaries) == 1
+    with rasterio.open(ids_path) as basin_ids:
+        assert basin_ids.read(1)[3, 3] == 1
+    csv_text = summary_path.read_text(encoding="utf-8")
+    assert "incremental_contributing_area_m2" in csv_text
+    assert "effective_rainfall_m" not in csv_text
+    assert "spill_volume_m3" not in csv_text

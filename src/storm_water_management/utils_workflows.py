@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import shutil
+import math
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -14,15 +14,17 @@ from rasterio.merge import merge
 from shapely.geometry import box, mapping
 from whitebox_workflows import WbEnvironment
 
-ENKOPING_CENTER_LON = 17.0778
-ENKOPING_CENTER_LAT = 59.6356
 WANG_LIU_FLAT_INCREMENT_M = 0.001
 
 
-def projected_center() -> tuple[float, float]:
-    """Convert Enköping's WGS84 town-center coordinates to SWEREF99 TM."""
+def projected_center(longitude: float, latitude: float) -> tuple[float, float]:
+    """Convert WGS84 longitude/latitude inputs to SWEREF99 TM coordinates."""
+    if not math.isfinite(longitude) or not -180 <= longitude <= 180:
+        raise ValueError("Longitude must be finite and between -180 and 180 degrees.")
+    if not math.isfinite(latitude) or not -90 <= latitude <= 90:
+        raise ValueError("Latitude must be finite and between -90 and 90 degrees.")
     transformer = Transformer.from_crs("EPSG:4326", "EPSG:3006", always_xy=True)
-    return transformer.transform(ENKOPING_CENTER_LON, ENKOPING_CENTER_LAT)
+    return transformer.transform(longitude, latitude)
 
 
 def select_tiles(
@@ -160,9 +162,7 @@ def run_depression_analysis(
         environment.write_raster(contributing_area, contributing_area_path.name)
         environment.write_raster(upslope_storage, upslope_storage_path.name)
         environment.write_raster(d8_pointer, d8_pointer_path.name)
-        environment.write_raster(
-            d8_contributing_area, d8_contributing_area_path.name
-        )
+        environment.write_raster(d8_contributing_area, d8_contributing_area_path.name)
     return output_path
 
 
@@ -226,28 +226,36 @@ def write_estimated_runoff_volume(
 ) -> Path:
     """Write the legacy per-cell runoff-volume raster in memory-bounded windows."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with rasterio.open(contributing_area_path) as area_source, rasterio.open(
-        upslope_storage_path
-    ) as storage_source:
+    with (
+        rasterio.open(contributing_area_path) as area_source,
+        rasterio.open(upslope_storage_path) as storage_source,
+    ):
         if (
             area_source.shape != storage_source.shape
             or area_source.transform != storage_source.transform
             or area_source.crs != storage_source.crs
         ):
-            raise ValueError("Contributing-area and upslope-storage rasters are not aligned.")
+            raise ValueError(
+                "Contributing-area and upslope-storage rasters are not aligned."
+            )
         nodata = area_source.nodata if area_source.nodata is not None else -9999.0
         metadata = area_source.profile.copy()
         metadata.pop("blockxsize", None)
         metadata.pop("blockysize", None)
         metadata.update(
-            driver="GTiff", count=1, dtype="float32", nodata=nodata,
-            compress="lzw", tiled=True
+            driver="GTiff",
+            count=1,
+            dtype="float32",
+            nodata=nodata,
+            compress="lzw",
+            tiled=True,
         )
         with rasterio.open(output_path, "w", **metadata) as destination:
             for row_off in range(0, area_source.height, 512):
                 for col_off in range(0, area_source.width, 512):
                     window = rasterio.windows.Window(
-                        col_off, row_off,
+                        col_off,
+                        row_off,
                         min(512, area_source.width - col_off),
                         min(512, area_source.height - row_off),
                     )
@@ -277,28 +285,40 @@ def write_estimated_ponding_depth(
 ) -> Path:
     """Write the legacy local ponding approximation in metre units by window."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with rasterio.open(upslope_storage_path) as storage_source, rasterio.open(
-        depression_depth_path
-    ) as depression_source:
+    with (
+        rasterio.open(upslope_storage_path) as storage_source,
+        rasterio.open(depression_depth_path) as depression_source,
+    ):
         if (
             storage_source.shape != depression_source.shape
             or storage_source.transform != depression_source.transform
             or storage_source.crs != depression_source.crs
         ):
-            raise ValueError("Upslope-storage and depression-depth rasters are not aligned.")
-        nodata = depression_source.nodata if depression_source.nodata is not None else -9999.0
+            raise ValueError(
+                "Upslope-storage and depression-depth rasters are not aligned."
+            )
+        nodata = (
+            depression_source.nodata
+            if depression_source.nodata is not None
+            else -9999.0
+        )
         metadata = depression_source.profile.copy()
         metadata.pop("blockxsize", None)
         metadata.pop("blockysize", None)
         metadata.update(
-            driver="GTiff", count=1, dtype="float32", nodata=nodata,
-            compress="lzw", tiled=True
+            driver="GTiff",
+            count=1,
+            dtype="float32",
+            nodata=nodata,
+            compress="lzw",
+            tiled=True,
         )
         with rasterio.open(output_path, "w", **metadata) as destination:
             for row_off in range(0, depression_source.height, 512):
                 for col_off in range(0, depression_source.width, 512):
                     window = rasterio.windows.Window(
-                        col_off, row_off,
+                        col_off,
+                        row_off,
                         min(512, depression_source.width - col_off),
                         min(512, depression_source.height - row_off),
                     )
@@ -314,44 +334,11 @@ def write_estimated_ponding_depth(
                     )
                     result = np.full(storage_values.shape, nodata, dtype=np.float32)
                     result[valid] = estimate_ponding_depth_m(
-                        storage_values[valid], depression_values[valid], effective_rain_m
+                        storage_values[valid],
+                        depression_values[valid],
+                        effective_rain_m,
                     ).astype(np.float32)
                     destination.write(result, 1, window=window)
-    return output_path
-
-
-def add_south_edge_drain(
-    dem_path: Path, output_path: Path, elevation_m: float, rows: int = 1
-) -> Path:
-    """Create an artificial south outlet by lowering a band of DEM rows."""
-    if rows < 1:
-        raise ValueError("The south drain must lower at least one raster row.")
-    if dem_path.resolve() == output_path.resolve():
-        raise ValueError("The drain DEM must be written to a separate file.")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(dem_path, output_path)
-    with rasterio.open(output_path, "r+") as dataset:
-        if dataset.height < rows:
-            raise ValueError(
-                f"Cannot lower {rows} rows in a raster that is only {dataset.height} rows high."
-            )
-        start_row = dataset.height - rows
-        window = ((start_row, dataset.height), (0, dataset.width))
-        southern_band = dataset.read(1, window=window)
-        valid = np.isfinite(southern_band)
-        if dataset.nodata is not None:
-            valid &= southern_band != dataset.nodata
-        if not valid.any():
-            raise ValueError("Southern drain band has no valid DEM cells.")
-        lowest_band_elevation = float(southern_band[valid].min())
-        if elevation_m >= lowest_band_elevation:
-            raise ValueError(
-                f"South drain elevation ({elevation_m:g} m) must be below the "
-                f"lowest valid elevation in the southern {rows}-row band "
-                f"({lowest_band_elevation:g} m)."
-            )
-        southern_band[valid] = elevation_m
-        dataset.write(southern_band, 1, window=window)
     return output_path
 
 
@@ -369,8 +356,12 @@ def clip_to_area(
         )
         metadata = source.meta.copy()
     metadata.update(
-        height=clipped.shape[1], width=clipped.shape[2], transform=transform,
-        nodata=nodata, compress="lzw", tiled=True
+        height=clipped.shape[1],
+        width=clipped.shape[2],
+        transform=transform,
+        nodata=nodata,
+        compress="lzw",
+        tiled=True,
     )
     with rasterio.open(output_path, "w", **metadata) as destination:
         destination.write(clipped)

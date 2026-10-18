@@ -57,7 +57,8 @@ python examples/analyze_enkoping.py --west-km 1.5 --east-km 1.5 \
 
 Use `--west-km`, `--east-km`, `--north-km`, and `--south-km` to change the
 result area. Use the four `--buffer-*-km` options to give upstream terrain room
-to drain into it. The default basin filters exclude components shallower than
+to drain into it. Set `--center-lon` and `--center-lat` to choose another WGS84
+center point. The default basin filters exclude components shallower than
 2 cm or smaller than 25 m²; adjust with `--minimum-depression-depth-m` and
 `--minimum-basin-area-m2` if needed.
 
@@ -67,6 +68,13 @@ storage, spill, outlet, and downstream-basin details are written to
 `results/enkoping/enkoping_buffered_basin_summary.csv`; basin IDs are in
 `results/enkoping/enkoping_depression_basin_id.tif`. Recreate the visualization
 with `python examples/plot_enkoping.py terrain`.
+
+To prepare the DEM-derived basin network for PySWMM without running this static
+rainfall/storage/spill estimate, run
+`python examples/analyze_enkoping.py --prepare-basins-only`. This writes the
+buffered basin-ID raster and a network summary at the same default paths used
+by the PySWMM workflow. The prepared summary has no event rainfall values, so
+provide `--effective-rainfall-mm` when running the PySWMM analysis.
 
 This is a static DEM-only screening estimate, not a hydraulic flood model. It
 uses uniform effective rainfall and D8 routing; it does not include storm
@@ -78,14 +86,16 @@ depression hierarchy, so adjacent or nested hollows can be grouped together.
 
 ## Enköping PySWMM scenario (conceptual)
 
-The standalone `examples/analyze_enkoping_pyswmm.py` script uses the existing
-basin summary plus its matching buffered DEM and basin-ID raster to create
+The standalone `examples/analyze_enkoping_pyswmm.py` script uses the prepared
+basin-network summary plus its matching buffered DEM and basin-ID raster to create
 SWMM storage curves from DEM elevations, connect storage nodes using the
 existing spill graph, and run a time-varying event simulation. Install the
 optional dependency with `pip install -e '.[swmm]'`, then run
 `python examples/analyze_enkoping_pyswmm.py` from the repository root. Outputs
 are written to `results/enkoping/pyswmm/`; use `--effective-rainfall-mm` and
-`--duration-hours` to test a different uniform effective-rainfall scenario.
+`--duration-hours` to set the uniform event rainfall and storm duration. A
+static basin summary from a previous `--rainfall-mm` run remains compatible and
+provides a default rainfall amount when the PySWMM override is omitted.
 By default, only depressions of at least 1,000 m² are represented as storage
 nodes. Smaller basins are collapsed into the next modeled basin or routed to a
 boundary outfall, while their incremental runoff area is conserved. Adjust

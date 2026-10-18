@@ -24,12 +24,15 @@ graph.
 """
 
 import argparse
+import math
 from pathlib import Path
 
 from storm_water_management import postprocess
-from storm_water_management.storm_scenario import write_basin_storage_spill_outputs
+from storm_water_management.storm_scenario import (
+    write_basin_network_outputs,
+    write_basin_storage_spill_outputs,
+)
 from storm_water_management.utils_workflows import (
-    add_south_edge_drain,
     clip_to_area,
     create_buffered_mosaic,
     effective_rainfall_m,
@@ -43,7 +46,8 @@ DEFAULT_INPUT_DIR = REPOSITORY_ROOT / "data" / "elevation" / "enkoping"
 DEFAULT_OUTPUT_DIR = REPOSITORY_ROOT / "results" / "enkoping"
 DEFAULT_RESULT_EXTENT_KM = 4.0
 DEFAULT_BUFFER_KM = 2.5
-DEFAULT_SOUTH_DRAIN_ELEVATION_M = 0.0
+DEFAULT_CENTER_LON = 17.0778
+DEFAULT_CENTER_LAT = 59.6356
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,12 +66,32 @@ def parse_args() -> argparse.Namespace:
         help=f"Folder for analysis outputs (default: {DEFAULT_OUTPUT_DIR}).",
     )
     parser.add_argument(
+        "--center-lon",
+        type=float,
+        default=DEFAULT_CENTER_LON,
+        help=f"Analysis center longitude in WGS84 degrees (default: {DEFAULT_CENTER_LON}).",
+    )
+    parser.add_argument(
+        "--center-lat",
+        type=float,
+        default=DEFAULT_CENTER_LAT,
+        help=f"Analysis center latitude in WGS84 degrees (default: {DEFAULT_CENTER_LAT}).",
+    )
+    parser.add_argument(
         "--rainfall-mm",
         type=float,
         help=(
             "Optional event rainfall depth in mm (use a locally sourced "
             "100-year design depth to represent that return period). Creates a "
             "basin-based ponding-depth raster and per-basin inflow/storage/spill summary."
+        ),
+    )
+    parser.add_argument(
+        "--prepare-basins-only",
+        action="store_true",
+        help=(
+            "Write DEM-derived basin IDs and network summary for PySWMM, "
+            "without running the static rainfall storage/spill estimate."
         ),
     )
     infiltration = parser.add_mutually_exclusive_group()
@@ -131,34 +155,6 @@ def parse_args() -> argparse.Namespace:
             ),
         )
     parser.add_argument(
-        "--south-drain",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help=(
-            "Lower the southern edge of the buffered DEM to create an artificial "
-            "open outlet. Disabled by default; --no-south-drain disables it."
-        ),
-    )
-    parser.add_argument(
-        "--south-drain-elevation-m",
-        type=float,
-        default=DEFAULT_SOUTH_DRAIN_ELEVATION_M,
-        help=(
-            "Elevation assigned to valid cells along the southern edge when "
-            f"--south-drain is enabled (default: {DEFAULT_SOUTH_DRAIN_ELEVATION_M:g} m)."
-        ),
-    )
-    parser.add_argument(
-        "--south-drain-rows",
-        type=int,
-        default=1,
-        help=(
-            "Number of southernmost DEM rows lowered to the drain elevation "
-            "when --south-drain is enabled (default: 1; at 1 m resolution, "
-            "100 rows makes a 100 m-wide artificial strip)."
-        ),
-    )
-    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Report the selected tiles and projected bounds without calculating.",
@@ -166,18 +162,27 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.rainfall_mm is not None and args.rainfall_mm <= 0:
         parser.error("--rainfall-mm must be greater than zero.")
+    if args.prepare_basins_only and args.rainfall_mm is not None:
+        parser.error("--prepare-basins-only cannot be combined with --rainfall-mm.")
     if args.rainfall_mm is None and (
         args.infiltration_fraction is not None
         or args.infiltration_capacity_mm_h is not None
         or args.rainfall_duration_hours is not None
     ):
         parser.error("Infiltration and duration options require --rainfall-mm.")
-    if args.infiltration_fraction is not None and not 0 <= args.infiltration_fraction <= 1:
+    if (
+        args.infiltration_fraction is not None
+        and not 0 <= args.infiltration_fraction <= 1
+    ):
         parser.error("--infiltration-fraction must be between 0 and 1.")
     if args.minimum_depression_depth_m < 0:
         parser.error("--minimum-depression-depth-m cannot be negative.")
     if args.minimum_basin_area_m2 < 0:
         parser.error("--minimum-basin-area-m2 cannot be negative.")
+    if not math.isfinite(args.center_lon) or not -180 <= args.center_lon <= 180:
+        parser.error("--center-lon must be between -180 and 180 degrees.")
+    if not math.isfinite(args.center_lat) or not -90 <= args.center_lat <= 90:
+        parser.error("--center-lat must be between -90 and 90 degrees.")
     if args.infiltration_capacity_mm_h is not None:
         if args.infiltration_capacity_mm_h < 0:
             parser.error("--infiltration-capacity-mm-h cannot be negative.")
@@ -196,15 +201,13 @@ def parse_args() -> argparse.Namespace:
             parser.error(f"--{direction}-km must be greater than zero.")
         if getattr(args, f"buffer_{direction}_km") < 0:
             parser.error(f"--buffer-{direction}-km cannot be negative.")
-    if args.south_drain_rows < 1:
-        parser.error("--south-drain-rows must be at least 1.")
     return args
 
 
 def main() -> None:
     """Build one buffered mosaic, analyze it once, and crop to the result area."""
     args = parse_args()
-    center_x, center_y = projected_center()
+    center_x, center_y = projected_center(args.center_lon, args.center_lat)
     result_bounds = (
         center_x - args.west_km * 1000,
         center_y - args.south_km * 1000,
@@ -219,7 +222,7 @@ def main() -> None:
     )
 
     tile_paths = select_tiles(args.input_dir, analysis_bounds)
-    print(f"Enköping center in SWEREF99 TM: ({center_x:.2f}, {center_y:.2f})")
+    print(f"Analysis center in SWEREF99 TM: ({center_x:.2f}, {center_y:.2f})")
     print(
         "Result extents from center (west/east/north/south): "
         f"{args.west_km:g}/{args.east_km:g}/{args.north_km:g}/"
@@ -230,19 +233,6 @@ def main() -> None:
         f"{args.buffer_west_km:g}/{args.buffer_east_km:g}/"
         f"{args.buffer_north_km:g}/{args.buffer_south_km:g} km."
     )
-    if args.south_drain:
-        if args.buffer_south_km <= 0:
-            raise ValueError(
-                "--south-drain requires --buffer-south-km greater than zero so "
-                "the artificial outlet stays outside the result area."
-            )
-        print(
-            f"South drain enabled: lowering the southernmost {args.south_drain_rows} "
-            f"raster row(s) to {args.south_drain_elevation_m:g} m "
-            "(artificial boundary condition)."
-        )
-    else:
-        print("South drain disabled.")
     print(f"Selected {len(tile_paths)} elevation tiles from {args.input_dir}.")
     for tile_path in tile_paths:
         print(f"  {tile_path.name}")
@@ -253,55 +243,37 @@ def main() -> None:
         return
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    suffix = "_south_drain" if args.south_drain else ""
-    buffered_dem = args.output_dir / f"enkoping_buffered_dem{suffix}.tif"
-    analysis_dem = buffered_dem
-    if args.south_drain:
-        analysis_dem = args.output_dir / "enkoping_buffered_dem_south_drain_conditioned.tif"
-    buffered_depth = (
-        args.output_dir / f"enkoping_buffered_depression_depth{suffix}.tif"
-    )
-    result_raster = args.output_dir / f"enkoping_depression_depth{suffix}.tif"
+    buffered_dem = args.output_dir / "enkoping_buffered_dem.tif"
+    buffered_depth = args.output_dir / "enkoping_buffered_depression_depth.tif"
+    result_raster = args.output_dir / "enkoping_depression_depth.tif"
     contributing_area_path = None
     upslope_storage_path = None
-    if args.rainfall_mm is not None:
+    prepare_basins = args.rainfall_mm is not None or args.prepare_basins_only
+    if prepare_basins:
         contributing_area_path = (
-            args.output_dir / f"enkoping_buffered_contributing_area{suffix}.tif"
+            args.output_dir / "enkoping_buffered_contributing_area.tif"
         )
-        upslope_storage_path = (
-            args.output_dir / f"enkoping_buffered_upslope_storage{suffix}.tif"
-        )
-        result_contributing_area = (
-            args.output_dir / f"enkoping_contributing_area{suffix}.tif"
-        )
-        result_upslope_storage = (
-            args.output_dir / f"enkoping_upslope_depression_storage{suffix}.tif"
-        )
-        buffered_ponding_depth = (
-            args.output_dir / f"enkoping_buffered_estimated_ponding_depth{suffix}.tif"
-        )
-        result_ponding_depth = (
-            args.output_dir / f"enkoping_estimated_ponding_depth{suffix}.tif"
-        )
-        d8_pointer_path = (
-            args.output_dir / f"enkoping_buffered_d8_pointer{suffix}.tif"
-        )
+        upslope_storage_path = args.output_dir / "enkoping_buffered_upslope_storage.tif"
+        d8_pointer_path = args.output_dir / "enkoping_buffered_d8_pointer.tif"
         d8_contributing_area_path = (
-            args.output_dir / f"enkoping_buffered_d8_contributing_area{suffix}.tif"
+            args.output_dir / "enkoping_buffered_d8_contributing_area.tif"
         )
         buffered_basin_ids = (
-            args.output_dir / f"enkoping_buffered_depression_basin_id{suffix}.tif"
+            args.output_dir / "enkoping_buffered_depression_basin_id.tif"
         )
-        result_basin_ids = (
-            args.output_dir / f"enkoping_depression_basin_id{suffix}.tif"
+        basin_summary_path = args.output_dir / "enkoping_buffered_basin_summary.csv"
+    if args.rainfall_mm is not None:
+        result_contributing_area = args.output_dir / "enkoping_contributing_area.tif"
+        result_upslope_storage = (
+            args.output_dir / "enkoping_upslope_depression_storage.tif"
         )
-        basin_summary_path = (
-            args.output_dir / f"enkoping_buffered_basin_summary{suffix}.csv"
+        buffered_ponding_depth = (
+            args.output_dir / "enkoping_buffered_estimated_ponding_depth.tif"
         )
+        result_ponding_depth = args.output_dir / "enkoping_estimated_ponding_depth.tif"
+        result_basin_ids = args.output_dir / "enkoping_depression_basin_id.tif"
         fraction = (
-            0.5
-            if args.infiltration_fraction is None
-            else args.infiltration_fraction
+            0.5 if args.infiltration_fraction is None else args.infiltration_fraction
         )
         effective_rain = effective_rainfall_m(
             args.rainfall_mm,
@@ -327,34 +299,40 @@ def main() -> None:
 
     print("Creating buffered elevation mosaic ...")
     create_buffered_mosaic(tile_paths, analysis_bounds, buffered_dem)
-    if args.south_drain:
-        print("Applying the optional southern-edge drain condition ...")
-        add_south_edge_drain(
-            buffered_dem,
-            analysis_dem,
-            args.south_drain_elevation_m,
-            rows=args.south_drain_rows,
-        )
     print("Running one depression-fill calculation over the full buffered mosaic ...")
-    if effective_rain is not None:
-        print("Also calculating contributing area and upslope depression storage ...")
+    if prepare_basins:
+        print("Calculating D8 flow and basin-network preparation rasters ...")
     run_depression_analysis(
-        analysis_dem,
+        buffered_dem,
         buffered_depth,
         contributing_area_path=contributing_area_path,
         upslope_storage_path=upslope_storage_path,
-        d8_pointer_path=d8_pointer_path if effective_rain is not None else None,
+        d8_pointer_path=d8_pointer_path if prepare_basins else None,
         d8_contributing_area_path=(
-            d8_contributing_area_path if effective_rain is not None else None
+            d8_contributing_area_path if prepare_basins else None
         ),
     )
+    if args.prepare_basins_only:
+        summaries = write_basin_network_outputs(
+            buffered_dem,
+            buffered_depth,
+            d8_pointer_path,
+            d8_contributing_area_path,
+            buffered_basin_ids,
+            basin_summary_path,
+            minimum_depression_depth_m=args.minimum_depression_depth_m,
+            minimum_basin_area_m2=args.minimum_basin_area_m2,
+        )
+        print(f"Prepared {len(summaries):,} DEM-derived basins for PySWMM.")
+        print(f"Basin IDs: {buffered_basin_ids}")
+        print(f"Basin network summary: {basin_summary_path}")
     print("Clipping to the requested result rectangle ...")
     clip_to_area(buffered_depth, result_raster, result_bounds)
-    if effective_rain is not None:
+    if args.rainfall_mm is not None:
         clip_to_area(contributing_area_path, result_contributing_area, result_bounds)
         clip_to_area(upslope_storage_path, result_upslope_storage, result_bounds)
         basin_summaries = write_basin_storage_spill_outputs(
-            analysis_dem,
+            buffered_dem,
             buffered_depth,
             d8_pointer_path,
             d8_contributing_area_path,
@@ -368,7 +346,9 @@ def main() -> None:
         clip_to_area(buffered_ponding_depth, result_ponding_depth, result_bounds)
         clip_to_area(buffered_basin_ids, result_basin_ids, result_bounds)
         print(f"Contributing area raster (m²): {result_contributing_area}")
-        print(f"Average upslope depression storage raster (m): {result_upslope_storage}")
+        print(
+            f"Average upslope depression storage raster (m): {result_upslope_storage}"
+        )
         total_spill = sum(float(row["spill_volume_m3"]) for row in basin_summaries)
         print(f"Basin-based estimated ponding-depth raster (m): {result_ponding_depth}")
         print(f"Depression basin ID raster: {result_basin_ids}")

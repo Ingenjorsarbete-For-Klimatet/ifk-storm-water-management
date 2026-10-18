@@ -96,9 +96,7 @@ def _find_spill_outlets(
         target_dem = dem[target_slice]
         invalid_boundary = (source_labels > 0) & ~target_valid
         if invalid_boundary.any():
-            touches_invalid[
-                np.unique(source_labels[invalid_boundary])
-            ] = True
+            touches_invalid[np.unique(source_labels[invalid_boundary])] = True
 
         boundary = (
             (source_labels > 0)
@@ -159,7 +157,9 @@ def _find_spill_outlets(
                 pair_key[follows_saddle],
             )
 
-    selected_pair = np.where(best_pair != np.iinfo(np.int64).max, best_pair, best_any_pair)
+    selected_pair = np.where(
+        best_pair != np.iinfo(np.int64).max, best_pair, best_any_pair
+    )
     outlet_inside = np.full(basin_count + 1, -1, dtype=np.int64)
     outlet_outside = np.full(basin_count + 1, -1, dtype=np.int64)
     has_outlet = selected_pair != np.iinfo(np.int64).max
@@ -222,10 +222,144 @@ def _water_level_for_volume(
             upper = active_cells
         else:
             lower = active_cells + 1
-    water_level = (
-        target_depth_area + cumulative_elevation[lower - 1]
-    ) / lower
+    water_level = (target_depth_area + cumulative_elevation[lower - 1]) / lower
     return min(float(water_level), spill_level_m)
+
+
+def prepare_basin_network(
+    dem: np.ndarray,
+    depression_depth: np.ndarray,
+    d8_pointer: np.ndarray,
+    contributing_area: np.ndarray,
+    cell_area_m2: float,
+    minimum_depression_depth_m: float = 0.02,
+    minimum_basin_area_m2: float = 25.0,
+) -> tuple[np.ndarray, list[dict[str, float | int | str]]]:
+    """Prepare basin labels, capacities, and downstream topology without rainfall.
+
+    The returned records contain terrain/network properties suitable for
+    building a dynamic model. No static event volume or ponding estimate is
+    computed here.
+    """
+    if cell_area_m2 <= 0 or not np.isfinite(cell_area_m2):
+        raise ValueError("Cell area must be finite and positive.")
+    if not (
+        dem.shape
+        == depression_depth.shape
+        == d8_pointer.shape
+        == contributing_area.shape
+    ):
+        raise ValueError(
+            "DEM, depression, pointer, and contributing-area arrays must align."
+        )
+
+    valid = (
+        np.isfinite(dem)
+        & np.isfinite(depression_depth)
+        & np.isfinite(d8_pointer)
+        & np.isfinite(contributing_area)
+        & (contributing_area >= 0)
+    )
+    labels, counts = label_depression_components(
+        dem,
+        depression_depth,
+        valid,
+        cell_area_m2,
+        minimum_depression_depth_m,
+        minimum_basin_area_m2,
+    )
+    basin_count = counts.size - 1
+    if basin_count == 0:
+        return labels, []
+
+    spill, inside_outlet, outside_outlet, censored = _find_spill_outlets(
+        dem, labels, valid, d8_pointer, counts
+    )
+    outlet_area = np.zeros(basin_count + 1, dtype=np.float64)
+    for basin_id in range(1, basin_count + 1):
+        inside = inside_outlet[basin_id]
+        if inside >= 0:
+            outlet_area[basin_id] = float(contributing_area.flat[inside])
+
+    parent = np.zeros(basin_count + 1, dtype=np.int32)
+    max_steps = min(dem.size, 1_000_000)
+    for basin_id in range(1, basin_count + 1):
+        outside = outside_outlet[basin_id]
+        if outside >= 0 and not censored[basin_id]:
+            parent[basin_id] = _downstream_basin(
+                int(outside), basin_id, labels, d8_pointer, valid, max_steps
+            )
+        receiver = int(parent[basin_id])
+        if receiver > 0 and outlet_area[receiver] <= outlet_area[basin_id]:
+            parent[basin_id] = 0
+
+    child_area = np.zeros(basin_count + 1, dtype=np.float64)
+    for basin_id in range(1, basin_count + 1):
+        receiver = int(parent[basin_id])
+        if receiver > 0:
+            child_area[receiver] += outlet_area[basin_id]
+    local_area = np.maximum(outlet_area - child_area, 0.0)
+
+    capacity = np.zeros(basin_count + 1, dtype=np.float64)
+    minimum_elevation = np.full(basin_count + 1, np.inf, dtype=np.float64)
+    flat_labels = labels.ravel()
+    flat_dem = dem.ravel()
+    for start in range(0, flat_labels.size, 1_000_000):
+        stop = min(start + 1_000_000, flat_labels.size)
+        ids = flat_labels[start:stop]
+        selected = ids > 0
+        if not selected.any():
+            continue
+        selected_ids = ids[selected]
+        elevations = flat_dem[start:stop][selected]
+        np.minimum.at(minimum_elevation, selected_ids, elevations)
+        closed = ~censored[selected_ids] & np.isfinite(spill[selected_ids])
+        if not closed.any():
+            continue
+        selected_ids = selected_ids[closed]
+        elevations = elevations[closed]
+        depths_to_spill = np.maximum(spill[selected_ids] - elevations, 0.0)
+        capacity += np.bincount(
+            selected_ids,
+            weights=depths_to_spill * cell_area_m2,
+            minlength=basin_count + 1,
+        )
+
+    records: list[dict[str, float | int | str]] = []
+    for basin_id in range(1, basin_count + 1):
+        inside = int(inside_outlet[basin_id])
+        outlet_row, outlet_col = (
+            divmod(inside, dem.shape[1]) if inside >= 0 else (-1, -1)
+        )
+        receiver = int(parent[basin_id])
+        if censored[basin_id] or not np.isfinite(spill[basin_id]):
+            status = "edge_or_nodata_censored"
+        elif outlet_area[basin_id] <= 0:
+            status = "no_contributing_area"
+        elif receiver > 0:
+            status = "spills_to_basin"
+        else:
+            status = "spills_out_of_analysis_area"
+        records.append(
+            {
+                "basin_id": basin_id,
+                "cell_count": int(counts[basin_id]),
+                "depression_area_m2": float(counts[basin_id] * cell_area_m2),
+                # Censored basins are routed to the model boundary, not treated
+                # as storage nodes; use a finite placeholder for CSV consumers.
+                "spill_elevation_m": float(spill[basin_id])
+                if np.isfinite(spill[basin_id])
+                else float(minimum_elevation[basin_id]),
+                "capacity_m3": float(capacity[basin_id]),
+                "contributing_area_m2": float(outlet_area[basin_id]),
+                "incremental_contributing_area_m2": float(local_area[basin_id]),
+                "downstream_basin_id": receiver,
+                "outlet_row": outlet_row,
+                "outlet_col": outlet_col,
+                "status": status,
+            }
+        )
+    return labels, records
 
 
 def simulate_basin_storage_spill(
@@ -260,7 +394,9 @@ def simulate_basin_storage_spill(
         == d8_pointer.shape
         == contributing_area.shape
     ):
-        raise ValueError("DEM, depression, pointer, and contributing-area arrays must align.")
+        raise ValueError(
+            "DEM, depression, pointer, and contributing-area arrays must align."
+        )
 
     valid = (
         np.isfinite(dem)
@@ -334,7 +470,6 @@ def simulate_basin_storage_spill(
             weights=depths_to_spill * cell_area_m2,
             minlength=basin_count + 1,
         )
-
     incoming = local_volume.copy()
     retained = np.zeros(basin_count + 1, dtype=np.float64)
     spill_volume = np.zeros(basin_count + 1, dtype=np.float64)
@@ -349,9 +484,7 @@ def simulate_basin_storage_spill(
             spill_volume[basin_id] = incoming[basin_id]
         else:
             retained[basin_id] = min(incoming[basin_id], capacity[basin_id])
-            spill_volume[basin_id] = max(
-                incoming[basin_id] - retained[basin_id], 0.0
-            )
+            spill_volume[basin_id] = max(incoming[basin_id] - retained[basin_id], 0.0)
             receiver = int(parent[basin_id])
             if receiver > 0:
                 incoming[receiver] += spill_volume[basin_id]
@@ -389,9 +522,7 @@ def simulate_basin_storage_spill(
         levels = water_levels[selected_ids]
         wet = np.isfinite(levels)
         result = np.zeros(selected_ids.shape, dtype=np.float32)
-        result[wet] = np.maximum(levels[wet] - elevations[wet], 0.0).astype(
-            np.float32
-        )
+        result[wet] = np.maximum(levels[wet] - elevations[wet], 0.0).astype(np.float32)
         flat_depths[start:stop][selected] = result
 
     summaries: list[dict[str, float | int | str]] = []
@@ -415,9 +546,9 @@ def simulate_basin_storage_spill(
                 "basin_id": basin_id,
                 "cell_count": int(counts[basin_id]),
                 "depression_area_m2": float(counts[basin_id] * cell_area_m2),
-                "spill_elevation_m": (
-                    float(spill[basin_id]) if np.isfinite(spill[basin_id]) else math.nan
-                ),
+                "spill_elevation_m": float(spill[basin_id])
+                if np.isfinite(spill[basin_id])
+                else math.nan,
                 "capacity_m3": float(capacity[basin_id]),
                 "contributing_area_m2": float(outlet_area[basin_id]),
                 "incremental_contributing_area_m2": float(local_area[basin_id]),
@@ -434,6 +565,104 @@ def simulate_basin_storage_spill(
             }
         )
     return labels, depths, summaries
+
+
+def write_basin_network_outputs(
+    dem_path: Path,
+    depression_depth_path: Path,
+    d8_pointer_path: Path,
+    contributing_area_path: Path,
+    basin_id_path: Path,
+    basin_summary_path: Path,
+    minimum_depression_depth_m: float = 0.02,
+    minimum_basin_area_m2: float = 25.0,
+) -> list[dict[str, float | int | str]]:
+    """Write basin labels and network properties without a rainfall scenario."""
+    paths = (depression_depth_path, d8_pointer_path, contributing_area_path)
+    with rasterio.open(dem_path) as dem_source:
+        arrays = []
+        for path in paths:
+            with rasterio.open(path) as source:
+                if (
+                    source.shape != dem_source.shape
+                    or source.transform != dem_source.transform
+                    or source.crs != dem_source.crs
+                ):
+                    raise ValueError(f"Basin preparation raster is not aligned: {path}")
+                arrays.append(source.read(1).astype(np.float32, copy=False))
+        dem = dem_source.read(1).astype(np.float32, copy=False)
+        cell_area = abs(
+            dem_source.transform.a * dem_source.transform.e
+            - dem_source.transform.b * dem_source.transform.d
+        )
+        transform = dem_source.transform
+        crs = dem_source.crs
+        profile = dem_source.profile.copy()
+
+    labels, summaries = prepare_basin_network(
+        dem,
+        arrays[0],
+        arrays[1],
+        arrays[2],
+        cell_area,
+        minimum_depression_depth_m,
+        minimum_basin_area_m2,
+    )
+    for summary in summaries:
+        row, col = int(summary["outlet_row"]), int(summary["outlet_col"])
+        if row >= 0 and col >= 0:
+            outlet_x, outlet_y = transform * (col + 0.5, row + 0.5)
+        else:
+            outlet_x, outlet_y = math.nan, math.nan
+        summary["outlet_x"] = float(outlet_x)
+        summary["outlet_y"] = float(outlet_y)
+        summary["crs"] = str(crs)
+
+    basin_id_path.parent.mkdir(parents=True, exist_ok=True)
+    label_profile = profile.copy()
+    label_profile.update(
+        driver="GTiff", count=1, dtype="int32", nodata=0, compress="lzw", tiled=True
+    )
+    label_profile.pop("blockxsize", None)
+    label_profile.pop("blockysize", None)
+    with rasterio.open(basin_id_path, "w", **label_profile) as basin_dest:
+        basin_dest.update_tags(
+            model="dem_derived_basin_network_preparation",
+            minimum_depression_depth_m=f"{minimum_depression_depth_m:.9g}",
+            minimum_basin_area_m2=f"{minimum_basin_area_m2:.9g}",
+            limitations=(
+                "8-connected depression-fill components and D8-derived spill graph; "
+                "not a nested depression hierarchy. No rainfall or event simulation."
+            ),
+        )
+        basin_dest.write(labels, 1)
+
+    basin_summary_path.parent.mkdir(parents=True, exist_ok=True)
+    fields = (
+        list(summaries[0])
+        if summaries
+        else [
+            "basin_id",
+            "cell_count",
+            "depression_area_m2",
+            "spill_elevation_m",
+            "capacity_m3",
+            "contributing_area_m2",
+            "incremental_contributing_area_m2",
+            "downstream_basin_id",
+            "outlet_row",
+            "outlet_col",
+            "status",
+            "outlet_x",
+            "outlet_y",
+            "crs",
+        ]
+    )
+    with basin_summary_path.open("w", newline="", encoding="utf-8") as summary_file:
+        writer = csv.DictWriter(summary_file, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(summaries)
+    return summaries
 
 
 def write_basin_storage_spill_outputs(
@@ -521,9 +750,10 @@ def write_basin_storage_spill_outputs(
     depth_profile.pop("blockysize", None)
     label_profile.pop("blockxsize", None)
     label_profile.pop("blockysize", None)
-    with rasterio.open(ponding_depth_path, "w", **depth_profile) as depth_dest, rasterio.open(
-        basin_id_path, "w", **label_profile
-    ) as basin_dest:
+    with (
+        rasterio.open(ponding_depth_path, "w", **depth_profile) as depth_dest,
+        rasterio.open(basin_id_path, "w", **label_profile) as basin_dest,
+    ):
         scenario_tags = {
             "model": "static_dem_d8_depression_storage_spill_screening",
             "effective_rainfall_m": f"{effective_rain_m:.9g}",

@@ -1,6 +1,6 @@
 """Run a DEM-informed, conceptual PySWMM event analysis for Enköping.
 
-This standalone analysis turns the existing DEM-derived basin summary and
+This standalone analysis turns a DEM-derived basin-network summary and
 aligned elevation/basin rasters into a simplified SWMM storage network. Major
 basins are represented by storage nodes whose area-versus-depth curves are
 sampled from DEM hypsometry; incremental D8 contributing area is represented
@@ -16,6 +16,9 @@ flood prediction. Change the event depth and duration to test alternatives.
 
 Install the optional dependency with ``pip install -e '.[swmm]'`` then run
 ``python examples/analyze_enkoping_pyswmm.py`` from the repository root.
+Create the network inputs first with ``python examples/analyze_enkoping.py
+--prepare-basins-only``. Pass ``--effective-rainfall-mm`` when using that
+rainfall-independent network summary.
 """
 
 import argparse
@@ -51,10 +54,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--effective-rainfall-mm",
         type=float,
-        default=None,
+        default=100,
         help=(
             "Net rainfall depth in mm. Defaults to the median effective rainfall "
-            "recorded in the basin-summary CSV. No further infiltration is applied."
+            "recorded in a static basin summary; required for a prepared network "
+            "summary without rainfall data. No further infiltration is applied."
         ),
     )
     parser.add_argument(
@@ -116,17 +120,16 @@ def main() -> None:
         raise ValueError("Report interval must be a positive divisor of 60 minutes.")
     if args.spill_channel_width_m <= 0 or not math.isfinite(args.spill_channel_width_m):
         raise ValueError("Spill-channel width must be finite and positive.")
-    if args.spill_channel_roughness <= 0 or not math.isfinite(args.spill_channel_roughness):
+    if args.spill_channel_roughness <= 0 or not math.isfinite(
+        args.spill_channel_roughness
+    ):
         raise ValueError("Spill-channel roughness must be finite and positive.")
 
-    source_basins, source_rainfall_mm = load_basins(args.basin_summary)
+    source_basins, rainfall_mm = load_basins(
+        args.basin_summary, args.effective_rainfall_mm
+    )
     basins, external_runoff_area_m2 = select_storage_basins(
         source_basins, args.minimum_storage_basin_area_m2
-    )
-    rainfall_mm = (
-        source_rainfall_mm
-        if args.effective_rainfall_mm is None
-        else args.effective_rainfall_mm
     )
     if rainfall_mm < 0 or not math.isfinite(rainfall_mm):
         raise ValueError("Effective rainfall must be finite and non-negative.")
@@ -135,7 +138,11 @@ def main() -> None:
     )
     geometries = build_storage_geometries(basins, basin_elevations, cell_area_m2)
 
-    if args.output_dir.exists() and any(args.output_dir.iterdir()) and not args.overwrite:
+    if (
+        args.output_dir.exists()
+        and any(args.output_dir.iterdir())
+        and not args.overwrite
+    ):
         raise FileExistsError(
             f"Output directory is not empty: {args.output_dir}. Use --overwrite to replace files."
         )

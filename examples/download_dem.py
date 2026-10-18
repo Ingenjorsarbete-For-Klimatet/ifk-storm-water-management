@@ -1,10 +1,11 @@
-"""Download Lantmäteriet's 1 m elevation tiles around Enköping.
+"""Download Lantmäteriet 1 m elevation tiles around a named location.
 
-By default, the search covers a 10 km radius around Enköping town. Use
-``--bbox MIN_LON MIN_LAT MAX_LON MAX_LAT`` to specify a different area, such
-as a municipality-wide bounding box. Set ``LANTMATERIET_USER`` and
-``LANTMATERIET_PASSWORD`` in the environment for account authentication.
-Files are saved under ``data/elevation/enkoping``.
+By default, the search covers a 10 km radius around Enköping. Set
+``--center-lon``, ``--center-lat`` and ``--name`` to choose another location,
+or use ``--bbox MIN_LON MIN_LAT MAX_LON MAX_LAT`` for an explicit area. Set
+``LANTMATERIET_USER`` and ``LANTMATERIET_PASSWORD`` in the environment for
+account authentication. By default, files are saved under
+``data/elevation/<location-name>``.
 
 Run from the repository root with ``python examples/download_enkoping_elevation.py``.
 """
@@ -14,6 +15,8 @@ import base64
 import json
 import math
 import os
+import re
+import unicodedata
 from pathlib import Path, PurePosixPath
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlencode, urljoin, urlsplit
@@ -22,29 +25,53 @@ from urllib.request import Request, urlopen
 import rasterio
 
 STAC_URL = "https://api.lantmateriet.se/stac-hojd/v1/search"
-COLLECTION = "mhm-66_6"
+COLLECTION = "dtm-cog" #mhm-66_6
 USER = os.environ.get("LANTMATERIET_USER")
 PASS = os.environ.get("LANTMATERIET_PASSWORD")
-ENKOPING_LON = 17.0778
-ENKOPING_LAT = 59.6356
-DEFAULT_OUTPUT = Path("data/elevation/enkoping")
+DEFAULT_NAME = "Enköping"
+DEFAULT_CENTER_LON = 17.0778
+DEFAULT_CENTER_LAT = 59.6356
+DEFAULT_OUTPUT_ROOT = Path("data/elevation")
 REQUEST_TIMEOUT_SECONDS = 200
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 
 
-def bbox_for_radius(radius_km: float) -> tuple[float, float, float, float]:
-    """Return an approximate WGS84 bounding box around Enköping town."""
-    if radius_km <= 0:
+def bbox_for_radius(
+    radius_km: float, longitude: float, latitude: float
+) -> tuple[float, float, float, float]:
+    """Return an approximate WGS84 bounding box around a coordinate."""
+    if not math.isfinite(radius_km) or radius_km <= 0:
         raise ValueError("The search radius must be greater than zero.")
+    if not math.isfinite(longitude) or not -180 <= longitude <= 180:
+        raise ValueError("Center longitude must be between -180 and 180 degrees.")
+    if not math.isfinite(latitude) or not -90 <= latitude <= 90:
+        raise ValueError("Center latitude must be between -90 and 90 degrees.")
 
     lat_delta = radius_km / 111.32
-    lon_delta = radius_km / (111.32 * math.cos(math.radians(ENKOPING_LAT)))
+    longitude_scale = 111.32 * math.cos(math.radians(latitude))
+    if abs(longitude_scale) < 1e-8:
+        raise ValueError(
+            "A radius-based search is not supported at the poles; use --bbox."
+        )
+    lon_delta = radius_km / longitude_scale
     return (
-        ENKOPING_LON - lon_delta,
-        ENKOPING_LAT - lat_delta,
-        ENKOPING_LON + lon_delta,
-        ENKOPING_LAT + lat_delta,
+        longitude - lon_delta,
+        latitude - lat_delta,
+        longitude + lon_delta,
+        latitude + lat_delta,
     )
+
+
+def location_slug(name: str) -> str:
+    """Convert a display name to a safe, portable output-directory name."""
+    normalized = unicodedata.normalize("NFKD", name)
+    ascii_name = normalized.encode("ascii", "ignore").decode("ascii").lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_name).strip("-")
+    if not slug:
+        raise ValueError(
+            "The location name must contain at least one letter or number."
+        )
+    return slug
 
 
 def validate_bbox(bbox: tuple[float, float, float, float]) -> None:
@@ -103,9 +130,7 @@ def make_auth_header() -> str:
     username = USER
     password = PASS
     if bool(username) != bool(password):
-        raise ValueError(
-            "Set both LANTMATERIET_USER and LANTMATERIET_PASSWORD."
-        )
+        raise ValueError("Set both LANTMATERIET_USER and LANTMATERIET_PASSWORD.")
     if not username or not password:
         raise ValueError(
             "Lantmäteriet download credentials are required. Set both "
@@ -178,10 +203,27 @@ def parse_args() -> argparse.Namespace:
     """Parse command-line options."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--name",
+        default=DEFAULT_NAME,
+        help=f"Location name used in the default output directory (default: {DEFAULT_NAME}).",
+    )
+    parser.add_argument(
+        "--center-lon",
+        type=float,
+        default=DEFAULT_CENTER_LON,
+        help=f"Location center longitude in WGS84 degrees (default: {DEFAULT_CENTER_LON}).",
+    )
+    parser.add_argument(
+        "--center-lat",
+        type=float,
+        default=DEFAULT_CENTER_LAT,
+        help=f"Location center latitude in WGS84 degrees (default: {DEFAULT_CENTER_LAT}).",
+    )
+    parser.add_argument(
         "--radius-km",
         type=float,
         default=10.0,
-        help="Search radius around Enköping town (default: 10 km; ignored with --bbox).",
+        help="Search radius around the selected center (default: 10 km; ignored with --bbox).",
     )
     parser.add_argument(
         "--bbox",
@@ -193,8 +235,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=DEFAULT_OUTPUT,
-        help=f"Directory for downloaded tiles (default: {DEFAULT_OUTPUT}).",
+        help="Directory for downloaded tiles (default: data/elevation/<location-name>).",
     )
     parser.add_argument(
         "--collection",
@@ -202,9 +243,16 @@ def parse_args() -> argparse.Namespace:
         help=f"Lantmäteriet STAC collection (default: {COLLECTION}).",
     )
     args = parser.parse_args()
-    args.bbox = tuple(args.bbox) if args.bbox else bbox_for_radius(args.radius_km)
     try:
+        location_slug(args.name)
+        args.bbox = (
+            tuple(args.bbox)
+            if args.bbox
+            else bbox_for_radius(args.radius_km, args.center_lon, args.center_lat)
+        )
         validate_bbox(args.bbox)
+        if args.output_dir is None:
+            args.output_dir = DEFAULT_OUTPUT_ROOT / location_slug(args.name)
         args.auth_header = make_auth_header()
     except ValueError as error:
         parser.error(str(error))
@@ -216,7 +264,10 @@ def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Searching collection {args.collection} for bbox {args.bbox} ...")
+    print(
+        f"Searching for {args.name} in collection {args.collection} "
+        f"within bbox {args.bbox} ..."
+    )
     try:
         items = find_tiles(args.bbox, args.collection)
         if not items:
