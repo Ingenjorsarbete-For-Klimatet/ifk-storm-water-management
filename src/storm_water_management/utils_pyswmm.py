@@ -12,6 +12,8 @@ import geopandas as gpd
 import numpy as np
 import rasterio
 
+from storm_water_management.config import PySwmmConfig
+
 RAINFALL_INTERVAL_MINUTES = 5
 CURVE_POINTS = 31
 MINIMUM_STORAGE_DEPTH_M = 0.001
@@ -342,7 +344,7 @@ def render_swmm_input(
     start_date, start_time = _format_date_time(SIMULATION_START)
     sections: list[str] = [
         "[TITLE]",
-        "Enkoping DEM-derived conceptual storage network - screening only",
+        "DEM-derived conceptual storage network - screening only",
         "Uniform effective rainfall; no sewer network or design hyetograph supplied.",
         "",
         "[OPTIONS]",
@@ -742,8 +744,8 @@ def write_model_notes(
     source_capacity = sum(basin.source_capacity_m3 for basin in basins)
     capacity_ratio = curve_capacity / source_capacity if source_capacity else math.nan
     with path.open("w", encoding="utf-8") as output:
-        output.write("Enköping DEM-informed conceptual PySWMM scenario\n")
-        output.write("=================================================\n\n")
+        output.write("DEM-informed conceptual PySWMM scenario\n")
+        output.write("========================================\n\n")
         output.write(
             "Interpretation: screening scenario; not a calibrated flood prediction.\n"
         )
@@ -792,5 +794,79 @@ def write_model_notes(
             "Check the ratio above: sampled curves are discretized from the DEM and may differ from the CSV capacity.\n"
         )
         output.write(
-            "All basin coordinates are inherited from the source CSV CRS (EPSG:5845); outputs are tabular.\n"
+            "Basin coordinates are inherited from the source summary CRS; outputs are tabular.\n"
         )
+
+
+def run_pyswmm_analysis(
+    config: PySwmmConfig,
+    *,
+    basin_summary_path: Path,
+    dem_path: Path,
+    basin_ids_path: Path,
+    output_dir: Path,
+) -> None:
+    """Build and run a conceptual SWMM model, exporting result time series."""
+    source_basins, rainfall_mm = load_basins(
+        basin_summary_path, config.effective_rainfall_mm
+    )
+    basins, external_runoff_area_m2 = select_storage_basins(
+        source_basins, config.minimum_storage_basin_area_m2
+    )
+    basin_elevations, cell_area_m2 = extract_basin_elevations(
+        dem_path, basin_ids_path, {basin.basin_id for basin in basins}
+    )
+    geometries = build_storage_geometries(basins, basin_elevations, cell_area_m2)
+    if output_dir.exists() and any(output_dir.iterdir()) and not config.overwrite:
+        raise FileExistsError(
+            f"Output directory is not empty: {output_dir}. "
+            "Set overwrite=True to replace files."
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    input_path = output_dir / "conceptual_storage.inp"
+    report_path = output_dir / "conceptual_storage.rpt"
+    output_path = output_dir / "conceptual_storage.out"
+    input_path.write_text(
+        render_swmm_input(
+            basins,
+            geometries,
+            rainfall_mm,
+            config.duration_hours,
+            config.drain_hours,
+            config.spill_channel_width_m,
+            config.spill_channel_roughness,
+            config.report_interval_minutes,
+            external_runoff_area_m2,
+        ),
+        encoding="utf-8",
+    )
+    write_model_notes(
+        output_dir,
+        basins,
+        geometries,
+        rainfall_mm,
+        config.duration_hours,
+        config.report_interval_minutes,
+        cell_area_m2,
+        len(source_basins),
+        config.minimum_storage_basin_area_m2,
+        external_runoff_area_m2,
+    )
+    node_csv, link_csv, basin_csv = run_model(
+        input_path,
+        report_path,
+        output_path,
+        basins,
+        config.report_interval_minutes,
+        output_dir,
+    )
+    print(
+        f"Ran {len(basins)} of {len(source_basins)} DEM-derived basins with "
+        f"{rainfall_mm:g} mm effective rainfall; {external_runoff_area_m2:,.0f} m² "
+        "of incremental area drains directly to the boundary outfall."
+    )
+    print(f"SWMM input: {input_path}")
+    print(f"Node time series: {node_csv}")
+    print(f"Spill-link time series: {link_csv}")
+    print(f"Basin summary: {basin_csv}")
+    print(f"Assumptions and capacity check: {output_dir / 'model_notes.txt'}")

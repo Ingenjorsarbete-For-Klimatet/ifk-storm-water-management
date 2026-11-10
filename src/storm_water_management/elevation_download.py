@@ -1,16 +1,7 @@
-"""Download Lantmäteriet 1 m elevation tiles around a named location.
+"""Download elevation tiles from Lantmäteriet's STAC API."""
 
-By default, the search covers a 10 km radius around Enköping. Set
-``--center-lon``, ``--center-lat`` and ``--name`` to choose another location,
-or use ``--bbox MIN_LON MIN_LAT MAX_LON MAX_LAT`` for an explicit area. Set
-``LANTMATERIET_USER`` and ``LANTMATERIET_PASSWORD`` in the environment for
-account authentication. By default, files are saved under
-``data/elevation/<location-name>``.
+from __future__ import annotations
 
-Run from the repository root with ``python examples/download_enkoping_elevation.py``.
-"""
-
-import argparse
 import base64
 import json
 import math
@@ -24,14 +15,10 @@ from urllib.request import Request, urlopen
 
 import rasterio
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STAC_URL = "https://api.lantmateriet.se/stac-hojd/v1/search"
-COLLECTION = "dtm-cog" #mhm-66_6
-USER = os.environ.get("LANTMATERIET_USER")
-PASS = os.environ.get("LANTMATERIET_PASSWORD")
-DEFAULT_NAME = "Enköping"
-DEFAULT_CENTER_LON = 17.0778
-DEFAULT_CENTER_LAT = 59.6356
-DEFAULT_OUTPUT_ROOT = Path("data/elevation")
+COLLECTION = "dtm-cog"
+DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "data" / "elevation"
 REQUEST_TIMEOUT_SECONDS = 200
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 
@@ -50,9 +37,7 @@ def bbox_for_radius(
     lat_delta = radius_km / 111.32
     longitude_scale = 111.32 * math.cos(math.radians(latitude))
     if abs(longitude_scale) < 1e-8:
-        raise ValueError(
-            "A radius-based search is not supported at the poles; use --bbox."
-        )
+        raise ValueError("A radius-based search is not supported at the poles; use a bounding box.")
     lon_delta = radius_km / longitude_scale
     return (
         longitude - lon_delta,
@@ -68,9 +53,7 @@ def location_slug(name: str) -> str:
     ascii_name = normalized.encode("ascii", "ignore").decode("ascii").lower()
     slug = re.sub(r"[^a-z0-9]+", "-", ascii_name).strip("-")
     if not slug:
-        raise ValueError(
-            "The location name must contain at least one letter or number."
-        )
+        raise ValueError("The location name must contain at least one letter or number.")
     return slug
 
 
@@ -89,9 +72,7 @@ def get_json(url: str) -> dict:
     if parsed_url.scheme != "https" or parsed_url.hostname != "api.lantmateriet.se":
         raise ValueError("Refusing a STAC request outside Lantmäteriet HTTPS.")
 
-    request = Request(  # noqa: S310
-        url, headers={"Accept": "application/geo+json, application/json"}
-    )
+    request = Request(url, headers={"Accept": "application/geo+json, application/json"})  # noqa: S310
     with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:  # noqa: S310
         return json.load(response)
 
@@ -107,28 +88,23 @@ def find_tiles(bbox: tuple[float, float, float, float], collection: str) -> list
     )
     page_url = f"{STAC_URL}?{query}"
     items_by_id: dict[str, dict] = {}
-
     while page_url:
         page = get_json(page_url)
         for item in page.get("features", []):
-            item_id = item.get("id") or item.get("assets", {}).get("data", {}).get(
-                "href", ""
-            )
+            item_id = item.get("id") or item.get("assets", {}).get("data", {}).get("href", "")
             items_by_id[item_id] = item
-
         next_link = next(
             (link for link in page.get("links", []) if link.get("rel") == "next"),
             None,
         )
         page_url = urljoin(page_url, next_link["href"]) if next_link else ""
-
     return list(items_by_id.values())
 
 
 def make_auth_header() -> str:
     """Build an HTTP Basic authorization value from environment variables."""
-    username = USER
-    password = PASS
+    username = os.environ.get("LANTMATERIET_USER")
+    password = os.environ.get("LANTMATERIET_PASSWORD")
     if bool(username) != bool(password):
         raise ValueError("Set both LANTMATERIET_USER and LANTMATERIET_PASSWORD.")
     if not username or not password:
@@ -136,7 +112,6 @@ def make_auth_header() -> str:
             "Lantmäteriet download credentials are required. Set both "
             "LANTMATERIET_USER and LANTMATERIET_PASSWORD in the environment."
         )
-
     encoded = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
     return f"Basic {encoded}"
 
@@ -155,7 +130,6 @@ def download_tile(href: str, output_dir: Path, auth_header: str) -> Path:
     parsed_href = urlsplit(href)
     if parsed_href.scheme != "https":
         raise ValueError("Refusing to download an elevation asset over non-HTTPS.")
-
     filename = unquote(PurePosixPath(parsed_href.path).name)
     if not filename:
         raise ValueError("A STAC data asset did not include a filename.")
@@ -168,14 +142,10 @@ def download_tile(href: str, output_dir: Path, auth_header: str) -> Path:
 
     headers = {"User-Agent": "ifk-storm-water-management elevation downloader"}
     hostname = parsed_href.hostname or ""
-    is_lantmateriet_host = hostname == "lantmateriet.se" or hostname.endswith(
-        ".lantmateriet.se"
-    )
-    if is_lantmateriet_host:
+    if hostname == "lantmateriet.se" or hostname.endswith(".lantmateriet.se"):
         headers["Authorization"] = auth_header
     request = Request(href, headers=headers)  # noqa: S310
     partial_file = destination.with_name(destination.name + ".part")
-
     try:
         with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:  # noqa: S310
             with partial_file.open("wb") as output:
@@ -188,110 +158,55 @@ def download_tile(href: str, output_dir: Path, auth_header: str) -> Path:
         partial_file.unlink(missing_ok=True)
         if isinstance(error, HTTPError) and error.code == 401:
             raise RuntimeError(
-                "Lantmäteriet rejected the download. Check your account access and "
-                "the LANTMATERIET_USER / LANTMATERIET_PASSWORD environment variables."
+                "Lantmäteriet rejected the download. Check account access and the "
+                "LANTMATERIET_USER / LANTMATERIET_PASSWORD environment variables."
             ) from error
         raise RuntimeError(f"Could not download {filename}: {error}") from error
     except Exception:
         partial_file.unlink(missing_ok=True)
         raise
-
     return destination
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse command-line options."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--name",
-        default=DEFAULT_NAME,
-        help=f"Location name used in the default output directory (default: {DEFAULT_NAME}).",
-    )
-    parser.add_argument(
-        "--center-lon",
-        type=float,
-        default=DEFAULT_CENTER_LON,
-        help=f"Location center longitude in WGS84 degrees (default: {DEFAULT_CENTER_LON}).",
-    )
-    parser.add_argument(
-        "--center-lat",
-        type=float,
-        default=DEFAULT_CENTER_LAT,
-        help=f"Location center latitude in WGS84 degrees (default: {DEFAULT_CENTER_LAT}).",
-    )
-    parser.add_argument(
-        "--radius-km",
-        type=float,
-        default=10.0,
-        help="Search radius around the selected center (default: 10 km; ignored with --bbox).",
-    )
-    parser.add_argument(
-        "--bbox",
-        type=float,
-        nargs=4,
-        metavar=("MIN_LON", "MIN_LAT", "MAX_LON", "MAX_LAT"),
-        help="Explicit WGS84 bounding box; use this to cover a larger area/municipality.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        help="Directory for downloaded tiles (default: data/elevation/<location-name>).",
-    )
-    parser.add_argument(
-        "--collection",
-        default=COLLECTION,
-        help=f"Lantmäteriet STAC collection (default: {COLLECTION}).",
-    )
-    args = parser.parse_args()
-    try:
-        location_slug(args.name)
-        args.bbox = (
-            tuple(args.bbox)
-            if args.bbox
-            else bbox_for_radius(args.radius_km, args.center_lon, args.center_lat)
-        )
-        validate_bbox(args.bbox)
-        if args.output_dir is None:
-            args.output_dir = DEFAULT_OUTPUT_ROOT / location_slug(args.name)
-        args.auth_header = make_auth_header()
-    except ValueError as error:
-        parser.error(str(error))
-    return args
+def download_elevation_tiles(
+    *,
+    name: str,
+    center_lon: float | None = None,
+    center_lat: float | None = None,
+    radius_km: float = 10.0,
+    bbox: tuple[float, float, float, float] | None = None,
+    output_dir: Path | None = None,
+    collection: str = COLLECTION,
+    auth_header: str | None = None,
+) -> list[Path]:
+    """Find and download elevation tiles intersecting a WGS84 area."""
+    location_slug(name)
+    if bbox is None:
+        if center_lon is None or center_lat is None:
+            raise ValueError("Supply either bbox or both center longitude and latitude.")
+        selected_bbox = bbox_for_radius(radius_km, center_lon, center_lat)
+    else:
+        selected_bbox = bbox
+    validate_bbox(selected_bbox)
+    destination_dir = output_dir or DEFAULT_OUTPUT_ROOT / location_slug(name)
+    authorization = auth_header or make_auth_header()
+    destination_dir.mkdir(parents=True, exist_ok=True)
 
+    print(f"Searching for {name} in collection {collection} within bbox {selected_bbox} ...")
+    items = find_tiles(selected_bbox, collection)
+    if not items:
+        print("No elevation tiles found for this area.")
+        return []
 
-def main() -> None:
-    """Find and download all elevation tiles intersecting the selected area."""
-    args = parse_args()
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-
-    print(
-        f"Searching for {args.name} in collection {args.collection} "
-        f"within bbox {args.bbox} ..."
-    )
-    try:
-        items = find_tiles(args.bbox, args.collection)
-        if not items:
-            print("No elevation tiles found for this area.")
-            return
-
-        print(f"Found {len(items)} tiles. Saving to {args.output_dir}.")
-        downloaded = 0
-        for item in items:
-            asset = item.get("assets", {}).get("data")
-            if not asset or not asset.get("href"):
-                print(f"Skipping {item.get('id', '<unknown item>')}: no data asset.")
-                continue
-
-            path = download_tile(asset["href"], args.output_dir, args.auth_header)
-            print(f"Ready: {path.name}")
-            downloaded += 1
-
-        print(f"Finished. {downloaded} tile(s) are available in {args.output_dir}.")
-    except (HTTPError, URLError) as error:
-        raise SystemExit(f"Lantmäteriet STAC request failed: {error}") from error
-    except RuntimeError as error:
-        raise SystemExit(str(error)) from error
-
-
-if __name__ == "__main__":
-    main()
+    print(f"Found {len(items)} tiles. Saving to {destination_dir}.")
+    downloaded: list[Path] = []
+    for item in items:
+        asset = item.get("assets", {}).get("data")
+        if not asset or not asset.get("href"):
+            print(f"Skipping {item.get('id', '<unknown item>')}: no data asset.")
+            continue
+        path = download_tile(asset["href"], destination_dir, authorization)
+        print(f"Ready: {path.name}")
+        downloaded.append(path)
+    print(f"Finished. {len(downloaded)} tile(s) are available in {destination_dir}.")
+    return downloaded

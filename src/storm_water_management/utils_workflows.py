@@ -1,4 +1,4 @@
-"""Reusable raster and terrain-workflow helpers for Enköping analysis."""
+"""Reusable raster and terrain-workflow helpers."""
 
 from __future__ import annotations
 

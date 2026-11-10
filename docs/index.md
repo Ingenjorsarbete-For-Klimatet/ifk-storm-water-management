@@ -1,116 +1,84 @@
-# Welcome to ifk-storm-water-management
+# Storm Water Management
 
-## Data
+Tools for terrain-based depression analysis, rainfall screening, and conceptual
+SWMM simulations using elevation rasters.
 
-The elevation data used in this repository is downloaded from **Lantmäteriet**.
-It consists of **raster elevation data** (preferably 1 m resolution) provided as
-**.tif files**.
+## Elevation data
 
-## Pre-processing
+Elevation tiles can be downloaded from Lantmäteriet with
+`storm_water_management.elevation_download.download_elevation_tiles()`. Configure
+the location and area with `DownloadConfig` from
+`storm_water_management.config`. Supply a location name and either a WGS84
+bounding box or center coordinates. Set
+`LANTMATERIET_USER` and `LANTMATERIET_PASSWORD` in the environment when required
+by the data service.
 
-If you need to analyze a larger area than a single **.tif** file covers,
-the files must first be **merged**.
+## Terrain analysis
 
-To run script from terminal:
+`AnalysisConfig` and `PySwmmConfig` are defined in
+[config.py](../src/storm_water_management/config.py). The
+`run_terrain_analysis()` function is defined in
+[storm_scenario.py](../src/storm_water_management/storm_scenario.py). Supply the
+input/output directories, center coordinates, and an output prefix explicitly;
+the package does not choose a geographic location:
 
-<pre>
-python src/storm_water_management/tif_preprocessing_utils.py "Folder including
-tif-files to merge"
-</pre>
+```python
+from pathlib import Path
 
-Or import and run in Python
+from storm_water_management.config import AnalysisConfig
+from storm_water_management.storm_scenario import run_terrain_analysis
 
-<pre>
-import tif_preprocessing_utils
-
-concat_tif_in_folder(folder)
-</pre>
-
-## Analysis
-
-To perform the main analysis, run:
-
-<pre>
-python src/storm_water_management/main.py "Path to file, e.g., <data/file.tif>"
-</pre>
-
-Or import and run in Python
-
-<pre>
-Import main
-
-main(filename)
-</pre>
-
-## Enköping rainfall scenario (screening)
-
-The Enköping example optionally estimates runoff from an event rainfall depth,
-routes the event volume through connected DEM-derived depression basins, stores
-water up to each estimated spill level, and sends excess volume downstream
-along D8 flow paths. For example, to run a 10 mm event with the default 50%
-infiltration assumption:
-
-```sh
-python examples/analyze_enkoping.py --west-km 1.5 --east-km 1.5 \
-  --north-km 1 --south-km 1.5 --rainfall-mm 10
+config = AnalysisConfig(
+    input_dir=Path("data/elevation/tiles"),
+    output_dir=Path("results/terrain"),
+    center_lon=12.0,
+    center_lat=55.0,
+    output_prefix="study_area",
+    west_km=2.0,
+    east_km=2.0,
+    north_km=2.0,
+    south_km=2.0,
+)
+run_terrain_analysis(config)
 ```
 
-Use `--west-km`, `--east-km`, `--north-km`, and `--south-km` to change the
-result area. Use the four `--buffer-*-km` options to give upstream terrain room
-to drain into it. Set `--center-lon` and `--center-lat` to choose another WGS84
-center point. The default basin filters exclude components shallower than
-2 cm or smaller than 25 m²; adjust with `--minimum-depression-depth-m` and
-`--minimum-basin-area-m2` if needed.
+To add a static rainfall screening estimate, set `rainfall_mm`. Infiltration
+can be specified as a fraction or as a constant capacity together with
+`rainfall_duration_hours`. The generated rasters and basin summaries are written
+to the configured output directory. This is a DEM/D8 screening method, not a
+calibrated hydraulic flood model.
 
-The rainfall-conditioned depth raster is
-`results/enkoping/enkoping_estimated_ponding_depth.tif`. Per-basin input,
-storage, spill, outlet, and downstream-basin details are written to
-`results/enkoping/enkoping_buffered_basin_summary.csv`; basin IDs are in
-`results/enkoping/enkoping_depression_basin_id.tif`. Recreate the visualization
-with `python examples/plot_enkoping.py terrain`.
+## Conceptual SWMM analysis
 
-To prepare the DEM-derived basin network for PySWMM without running this static
-rainfall/storage/spill estimate, run
-`python examples/analyze_enkoping.py --prepare-basins-only`. This writes the
-buffered basin-ID raster and a network summary at the same default paths used
-by the PySWMM workflow. The prepared summary has no event rainfall values, so
-provide `--effective-rainfall-mm` when running the PySWMM analysis.
+`PySwmmConfig` is defined in
+[config.py](../src/storm_water_management/config.py), and
+`run_pyswmm_analysis()` is defined in
+[utils_pyswmm.py](../src/storm_water_management/utils_pyswmm.py). Provide the
+summary, DEM, basin-ID, and output paths explicitly:
 
-This is a static DEM-only screening estimate, not a hydraulic flood model. It
-uses uniform effective rainfall and D8 routing; it does not include storm
-timing, spatially varying infiltration, culverts, sewers, buildings, or
-calibration. Depressions touching NoData or the analysis edge are treated as
-censored/open. Results depend on the basin size/depth filters and buffer size.
-The current method labels 8-connected fill zones, not a complete nested
-depression hierarchy, so adjacent or nested hollows can be grouped together.
+```python
+from pathlib import Path
 
-## Enköping PySWMM scenario (conceptual)
+from storm_water_management.config import PySwmmConfig
+from storm_water_management.utils_pyswmm import run_pyswmm_analysis
 
-The standalone `examples/analyze_enkoping_pyswmm.py` script uses the prepared
-basin-network summary plus its matching buffered DEM and basin-ID raster to create
-SWMM storage curves from DEM elevations, connect storage nodes using the
-existing spill graph, and run a time-varying event simulation. Install the
-optional dependency with `pip install -e '.[swmm]'`, then run
-`python examples/analyze_enkoping_pyswmm.py` from the repository root. Outputs
-are written to `results/enkoping/pyswmm/`; use `--effective-rainfall-mm` and
-`--duration-hours` to set the uniform event rainfall and storm duration. A
-static basin summary from a previous `--rainfall-mm` run remains compatible and
-provides a default rainfall amount when the PySWMM override is omitted.
-By default, only depressions of at least 1,000 m² are represented as storage
-nodes. Smaller basins are collapsed into the next modeled basin or routed to a
-boundary outfall, while their incremental runoff area is conserved. Adjust
-`--minimum-storage-basin-area-m2` to change that tradeoff. The output includes
-node/link time-series CSVs, a per-basin peak summary, the generated SWMM input,
-and model assumptions/continuity information.
+run_pyswmm_analysis(
+    PySwmmConfig(effective_rainfall_mm=100, duration_hours=6),
+    basin_summary_path=Path("results/terrain/study_area_buffered_basin_summary.csv"),
+    dem_path=Path("results/terrain/study_area_buffered_dem.tif"),
+    basin_ids_path=Path("results/terrain/study_area_buffered_depression_basin_id.tif"),
+    output_dir=Path("results/swmm"),
+)
+```
 
-Create a PySWMM visualization of basin peak depth, node flooding, aggregate
-boundary outflow, and stored volume with
-`python examples/plot_enkoping.py pyswmm`. The default PNG is
-`results/enkoping/pyswmm/enkoping_pyswmm_results.png`.
+Install the optional dependency with `pip install -e '.[swmm]'`. The conceptual
+model uses DEM-derived storage basins, uniform net rainfall, and assumed
+routing parameters; its results are exploratory and not infrastructure-grade
+flood predictions.
 
-No surveyed storm-drain network, calibrated surface roughness, or design
-hyetograph is available in the repository. The script therefore simulates
-DEM-derived surface depressions only, uses a uniform storm and assumed
-overland-flow/weir parameters, and treats the CSV rainfall as net rainfall
-(without subtracting infiltration again). Its output is an exploratory dynamic
-screening scenario, not a calibrated or infrastructure-grade flood prediction.
+## Visualization
+
+Plot functions are available in
+[utils_plots.py](../src/storm_water_management/utils_plots.py). They take input
+raster/vector paths and output image paths directly, so callers can organize
+results for any study area.

@@ -1,4 +1,4 @@
-"""Plot Enköping terrain/rainfall rasters and conceptual PySWMM results."""
+"""Plot terrain/rainfall rasters and conceptual PySWMM results."""
 
 # ruff: noqa: W191
 
@@ -21,8 +21,7 @@ import rasterio
 from matplotlib.colors import BoundaryNorm, ListedColormap, LogNorm, Normalize
 from rasterio.enums import Resampling
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-RESULTS_DIR = REPOSITORY_ROOT / "results" / "enkoping"
+RESULTS_DIR = Path("results")
 DEPTH_LIMITS_M = (0.1, 0.2, 0.5, 1.0, float("inf"))
 DEPTH_LABELS = ("0.1–0.2 m", "0.2–0.5 m", "0.5–1 m", ">1 m")
 DEPTH_COLORS = ("#440154", "#31688e", "#35b779", "#fde725")
@@ -66,9 +65,9 @@ def create_terrain_plot(
 ) -> None:
 	"""Plot depression depth, elevation, and optional runoff/routing rasters."""
 	if not raster_path.is_file():
-		raise FileNotFoundError(f"Enköping result raster not found: {raster_path}")
+		raise FileNotFoundError(f"Result raster not found: {raster_path}")
 	if not elevation_path.is_file():
-		raise FileNotFoundError(f"Enköping elevation raster not found: {elevation_path}")
+		raise FileNotFoundError(f"Elevation raster not found: {elevation_path}")
 	with rasterio.open(raster_path) as depth_src:
 		if depth_src.crs is None:
 			raise ValueError("The result raster has no CRS.")
@@ -113,6 +112,37 @@ def create_terrain_plot(
 
 	scenario_path = ponding_depth_path or runoff_volume_path
 	scenario_depth = ponding_depth_path is not None
+	if scenario_path is not None:
+		if not scenario_path.is_file():
+			raise FileNotFoundError(f"Scenario raster not found: {scenario_path}")
+		with rasterio.open(scenario_path) as scenario_src:
+			scenario_aligned = (
+				scenario_src.crs == crs and scenario_src.transform == transform
+				and scenario_src.width == raster_width
+				and scenario_src.height == raster_height
+			)
+		if not scenario_aligned:
+			print(
+				f"Skipping optional scenario raster with a mismatched grid: {scenario_path}"
+			)
+			scenario_path = None
+	if flow_accumulation_path is not None:
+		if not flow_accumulation_path.is_file():
+			raise FileNotFoundError(
+				f"Flow-accumulation raster not found: {flow_accumulation_path}"
+			)
+		with rasterio.open(flow_accumulation_path) as flow_src:
+			flow_aligned = (
+				flow_src.crs == crs and flow_src.transform == transform
+				and flow_src.width == raster_width
+				and flow_src.height == raster_height
+			)
+		if not flow_aligned:
+			print(
+				"Skipping optional flow-accumulation raster with a mismatched grid: "
+				f"{flow_accumulation_path}"
+			)
+			flow_accumulation_path = None
 	figure, axes = plt.subplots(1, 3, figsize=(17, 7), constrained_layout=True)
 	image = axes[0].imshow(
 		_depth_classes(depth), extent=extent, origin="upper", cmap=DEPTH_CLASS_CMAP,
@@ -202,7 +232,7 @@ def create_terrain_plot(
 			axis.set_ylabel("Northing (m)")
 			axis.set_aspect("equal", adjustable="box")
 	output_path.parent.mkdir(parents=True, exist_ok=True)
-	figure.suptitle(f"Enköping terrain results — {crs}", fontsize=15, fontweight="bold")
+	figure.suptitle(f"Terrain analysis results — {crs}", fontsize=15, fontweight="bold")
 	figure.savefig(output_path, dpi=180, bbox_inches="tight", facecolor="white")
 	plt.close(figure)
 	threshold_cells = int((valid_values >= DEPTH_LIMITS_M[0]).sum())
@@ -428,7 +458,7 @@ def create_pyswmm_plot(
 		axis.tick_params(axis="x", labelrotation=25)
 		axis.grid(alpha=.25)
 	fig.suptitle(
-		f"Enköping conceptual PySWMM scenario — {len(peaks)} basins; "
+		f"Conceptual PySWMM scenario — {len(peaks)} basins; "
 		f"peak depth {np.nanmax(depths):.2f} m",
 		fontsize=15, fontweight="bold",
 	)
@@ -443,11 +473,11 @@ def main(plot_type: str, argv: Sequence[str] | None = None) -> None:
 	parser = argparse.ArgumentParser(description=__doc__)
 	if plot_type == "terrain":
 		parser.add_argument("--raster", type=Path,
-							default=RESULTS_DIR / "enkoping_depression_depth.tif")
+							default=RESULTS_DIR / "depression_depth.tif")
 		parser.add_argument("--elevation", type=Path,
-							default=RESULTS_DIR / "enkoping_buffered_dem.tif")
+							default=RESULTS_DIR / "buffered_dem.tif")
 		parser.add_argument("--output", type=Path,
-							default=RESULTS_DIR / "enkoping_depression_depth_plot.png")
+							default=RESULTS_DIR / "depression_depth_plot.png")
 		parser.add_argument("--flow-accumulation", type=Path)
 		parser.add_argument("--ponding-depth", type=Path)
 		parser.add_argument("--runoff-volume", type=Path)
@@ -465,11 +495,11 @@ def main(plot_type: str, argv: Sequence[str] | None = None) -> None:
 		parser.add_argument("--links", type=Path, default=directory / "spill_link_timeseries.csv")
 		parser.add_argument("--summary", type=Path, default=directory / "pyswmm_basin_summary.csv")
 		parser.add_argument("--basin-ids", type=Path,
-							default=RESULTS_DIR / "enkoping_buffered_depression_basin_id.tif")
+							default=RESULTS_DIR / "buffered_depression_basin_id.tif")
 		parser.add_argument("--dem", type=Path,
-							default=RESULTS_DIR / "enkoping_buffered_dem.tif")
+							default=RESULTS_DIR / "buffered_dem.tif")
 		parser.add_argument("--output", type=Path,
-							default=directory / "enkoping_pyswmm_results.png")
+							default=directory / "pyswmm_results.png")
 		parser.add_argument("--max-display-pixels", type=int, default=1400)
 		parser.add_argument("--minimum-flow-m3s", type=float, default=.005)
 		args = parser.parse_args(argv)
