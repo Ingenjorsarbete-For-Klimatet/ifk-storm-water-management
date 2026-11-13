@@ -24,6 +24,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+pmtiles = [
+    "pandas",
+    "numba",
+    "pmtiles",
+    "pillow",
+    "pillow-avif-plugin",
+]
 lint = [
     "ruff ~= 0.1",
 ]
