@@ -1,13 +1,33 @@
-"""DEM-derived static depression storage and spill screening."""
+"""DEM-derived static depression storage and spill screening.
+
+Behaviour notes (changes relative to the first version):
+
+* Depression components are labelled from every cell with fill depth above a
+  tiny epsilon, and the user thresholds (``minimum_depression_depth_m`` and
+  ``minimum_basin_area_m2``) are applied to whole components (maximum depth and
+  area). Spill saddles are evaluated on the filled surface (``dem + depth``),
+  so shallow wall/fringe cells no longer bias the spill level low.
+* NoData cells are masked explicitly when rasters are read, so a finite NoData
+  value (for example -9999) is never treated as terrain.
+* D8 contributing area may be given in m^2 (default) or in cells.
+* Network preparation and the storm simulation share one network builder, so
+  capacity, spill level and status are identical in both modes.
+"""
 
 from __future__ import annotations
 
 import csv
 import math
+import warnings
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict
 
 import numpy as np
 import rasterio
+import rasterio.transform
+from rasterio.windows import Window
 from scipy import ndimage
 
 from storm_water_management.config import AnalysisConfig
@@ -32,6 +52,128 @@ D8_OFFSETS = {
 }
 D8_CODES = {offset: code for code, offset in D8_OFFSETS.items()}
 
+# Fill depth above which a cell belongs to a depression component. This must
+# exceed any epsilon gradient added by the DEM conditioning (fix-flats) step.
+LABEL_EPSILON_M = 1e-4
+# Bumped when behaviour changes; diagnose_basin_network.py refuses older copies.
+MODULE_VERSION = 3
+# Outlet selection prefers the crossing the D8 pointer follows if its saddle is
+# within this distance of the lowest saddle (covers fix-flats epsilon gradients).
+OUTLET_FOLLOW_TOLERANCE_M = 5e-3
+# Used when the configuration does not give an infiltration fraction.
+# TODO: move into AnalysisConfig.
+DEFAULT_INFILTRATION_FRACTION = 0.5
+
+_BLOCK_CELLS = 1_000_000
+
+# Reasons a downstream trace from a spill saddle can end.
+TRACE_BASIN = "basin"
+TRACE_EDGE = "raster_edge"
+TRACE_NODATA = "nodata"
+TRACE_NO_FLOW = "no_flow_direction"
+TRACE_CYCLE = "cycle"
+TRACE_MAX_STEPS = "max_steps"
+_OPEN_END_REASONS = {TRACE_EDGE, TRACE_NODATA}
+
+STATUS_CENSORED = "edge_or_nodata_censored"
+STATUS_NO_AREA = "no_contributing_area"
+STATUS_TO_BASIN = "spills_to_basin"
+STATUS_DROPPED = "spill_link_dropped"
+STATUS_OUT = "spills_out_of_analysis_area"
+STATUS_UNRESOLVED = "spill_path_unresolved"
+
+
+class BasinRecord(TypedDict, total=False):
+    """One row of the basin summary CSV (event fields only in storm mode)."""
+
+    basin_id: int
+    cell_count: int
+    depression_area_m2: float
+    max_depression_depth_m: float
+    min_elevation_m: float
+    spill_elevation_m: float
+    capacity_m3: float
+    contributing_area_m2: float
+    incremental_contributing_area_m2: float
+    local_event_runoff_m3: float
+    incoming_volume_m3: float
+    retained_volume_m3: float
+    spill_volume_m3: float
+    water_level_m: float
+    effective_rainfall_m: float
+    downstream_basin_id: int
+    downstream_link_dropped: int
+    dropped_receiver_id: int
+    spill_trace_end: str
+    outlet_row: int
+    outlet_col: int
+    status: str
+    outlet_x: float
+    outlet_y: float
+    crs: str
+
+
+_FIELDS_HEAD = [
+    "basin_id",
+    "cell_count",
+    "depression_area_m2",
+    "max_depression_depth_m",
+    "min_elevation_m",
+    "spill_elevation_m",
+    "capacity_m3",
+    "contributing_area_m2",
+    "incremental_contributing_area_m2",
+]
+_FIELDS_EVENT = [
+    "local_event_runoff_m3",
+    "incoming_volume_m3",
+    "retained_volume_m3",
+    "spill_volume_m3",
+    "water_level_m",
+    "effective_rainfall_m",
+]
+_FIELDS_TAIL = [
+    "downstream_basin_id",
+    "downstream_link_dropped",
+    "dropped_receiver_id",
+    "spill_trace_end",
+    "outlet_row",
+    "outlet_col",
+    "status",
+    "outlet_x",
+    "outlet_y",
+    "crs",
+]
+NETWORK_FIELDS = _FIELDS_HEAD + _FIELDS_TAIL
+STORM_FIELDS = _FIELDS_HEAD + _FIELDS_EVENT + _FIELDS_TAIL
+
+
+# --------------------------------------------------------------------------
+# Labelling and spill detection
+# --------------------------------------------------------------------------
+def _row_block(width: int) -> int:
+    return max(1, _BLOCK_CELLS // max(1, width))
+
+
+def _valid_mask(
+    dem: np.ndarray,
+    depression_depth: np.ndarray,
+    d8_pointer: np.ndarray,
+    contributing_area: np.ndarray,
+    dem_nodata: float | None = None,
+) -> np.ndarray:
+    """Cells where every input is usable; optionally masks a finite NoData value."""
+    valid = (
+        np.isfinite(dem)
+        & np.isfinite(depression_depth)
+        & np.isfinite(d8_pointer)
+        & np.isfinite(contributing_area)
+        & (contributing_area >= 0)
+    )
+    if dem_nodata is not None and np.isfinite(dem_nodata):
+        valid &= dem != dem.dtype.type(dem_nodata)
+    return valid
+
 
 def label_depression_components(
     dem: np.ndarray,
@@ -40,21 +182,31 @@ def label_depression_components(
     cell_area_m2: float,
     minimum_depth_m: float,
     minimum_area_m2: float,
+    label_epsilon_m: float = LABEL_EPSILON_M,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Label retained 8-connected depression-fill components.
 
-    Returns an int32 label grid (zero is background) and a per-label cell count.
-    Small components are omitted to reduce sensitivity to tiny DEM artefacts.
+    Cells with fill depth above ``label_epsilon_m`` form components. A component
+    is retained when its maximum depth exceeds ``minimum_depth_m`` and its area
+    reaches ``minimum_area_m2``. Returns an int32 label grid (zero is
+    background) and a per-label cell count. ``dem`` is unused and kept for API
+    compatibility.
     """
-    if minimum_depth_m < 0 or minimum_area_m2 < 0:
-        raise ValueError("Basin depth and area thresholds must be non-negative.")
-    depression_mask = valid & (depression_depth > minimum_depth_m)
+    if minimum_depth_m < 0 or minimum_area_m2 < 0 or label_epsilon_m < 0:
+        raise ValueError("Basin depth, area and epsilon thresholds must be non-negative.")
+    depression_mask = valid & (depression_depth > label_epsilon_m)
     labels, component_count = ndimage.label(
         depression_mask, structure=np.ones((3, 3), dtype=np.uint8)
     )
+    if component_count == 0:
+        return labels.astype(np.int32), np.zeros(1, dtype=np.int64)
     counts = np.bincount(labels.ravel(), minlength=component_count + 1)
+    max_depth = np.zeros(component_count + 1, dtype=np.float64)
+    max_depth[1:] = ndimage.maximum(
+        depression_depth, labels, index=np.arange(1, component_count + 1)
+    )
     minimum_cells = max(1, math.ceil(minimum_area_m2 / cell_area_m2))
-    keep = counts >= minimum_cells
+    keep = (counts >= minimum_cells) & (max_depth > minimum_depth_m)
     keep[0] = False
     kept_ids = np.flatnonzero(keep)
     remap = np.zeros(component_count + 1, dtype=np.int32)
@@ -76,16 +228,34 @@ def _neighbor_slices(
 
 
 def _find_spill_outlets(
-    dem: np.ndarray,
+    surface: np.ndarray,
     labels: np.ndarray,
     valid: np.ndarray,
     pointer: np.ndarray,
     counts: np.ndarray,
+    accumulation: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Find each component's lowest valid boundary saddle and D8 outlet pair."""
+    """Find each component's lowest valid boundary saddle and D8 outlet pair.
+
+    ``surface`` is the filled surface (``dem + depression_depth``). The saddle of
+    a boundary pair is the higher of its two filled elevations, and the spill
+    level is the lowest saddle.
+
+    The outlet pair is the crossing the D8 pointer follows (saddle within
+    ``OUTLET_FOLLOW_TOLERANCE_M`` of the spill level) that carries the largest
+    ``accumulation``: after conditioning, all water of a basin leaves through its
+    real exit, which therefore has the largest accumulation, whereas side
+    crossings that merely tie on saddle elevation (plateau rims) carry little.
+    Without ``accumulation`` the lowest-saddle crossing is used. If no crossing is
+    followed by the pointer, the lowest-saddle pair is used. Remaining ties go to
+    the lowest linear-index pair, so the result is deterministic.
+    """
     basin_count = counts.size - 1
     height, width = labels.shape
-    spill_levels = np.full(basin_count + 1, np.inf, dtype=np.float64)
+    total_cells = height * width
+    if total_cells * total_cells >= np.iinfo(np.int64).max:
+        raise ValueError("Raster too large for the int64 outlet-pair key (about 3e9 cells).")
+
     touches_invalid = np.zeros(basin_count + 1, dtype=bool)
     # Raster-edge and NoData-adjacent components are open/censored; their true
     # spill level may lie outside the available DEM and is not inferred here.
@@ -94,43 +264,17 @@ def _find_spill_outlets(
     )
     touches_invalid[np.unique(edge_labels[edge_labels > 0])] = True
 
-    for (row_offset, col_offset), _code in D8_CODES.items():
-        source_slice, target_slice = _neighbor_slices(
-            height, width, row_offset, col_offset
-        )
-        source_labels = labels[source_slice]
-        target_labels = labels[target_slice]
-        source_valid = valid[source_slice]
-        target_valid = valid[target_slice]
-        source_dem = dem[source_slice]
-        target_dem = dem[target_slice]
-        invalid_boundary = (source_labels > 0) & ~target_valid
-        if invalid_boundary.any():
-            touches_invalid[np.unique(source_labels[invalid_boundary])] = True
-
-        boundary = (
-            (source_labels > 0)
-            & source_valid
-            & target_valid
-            & (target_labels != source_labels)
-        )
-        if not boundary.any():
-            continue
-        basin_ids = source_labels[boundary]
-        saddle = np.maximum(source_dem[boundary], target_dem[boundary])
-        np.minimum.at(spill_levels, basin_ids, saddle)
-
-    # On a tied lowest saddle, prefer a crossing that the conditioned D8 pointer
-    # actually follows, then choose the lowest linear-index pair deterministically.
-    best_pair = np.full(basin_count + 1, np.iinfo(np.int64).max, dtype=np.int64)
-    best_any_pair = np.full_like(best_pair, np.iinfo(np.int64).max)
-    total_cells = height * width
+    # Boundary pairs are few compared with the raster, so collect them once.
+    id_parts, saddle_parts, key_parts, follow_parts, area_parts = [], [], [], [], []
     for (row_offset, col_offset), code in D8_CODES.items():
         source_slice, target_slice = _neighbor_slices(
             height, width, row_offset, col_offset
         )
         source_labels = labels[source_slice]
         target_labels = labels[target_slice]
+        invalid_boundary = (source_labels > 0) & ~valid[target_slice]
+        if invalid_boundary.any():
+            touches_invalid[np.unique(source_labels[invalid_boundary])] = True
         boundary = (
             (source_labels > 0)
             & valid[source_slice]
@@ -139,44 +283,101 @@ def _find_spill_outlets(
         )
         if not boundary.any():
             continue
-        source_dem = dem[source_slice]
-        target_dem = dem[target_slice]
-        basin_ids = source_labels[boundary]
-        saddle = np.maximum(source_dem[boundary], target_dem[boundary])
-        at_lowest_saddle = np.isclose(
-            saddle, spill_levels[basin_ids], rtol=0.0, atol=1e-6
-        )
-        if not at_lowest_saddle.any():
-            continue
-
         boundary_rows, boundary_cols = np.nonzero(boundary)
-        source_rows = boundary_rows + source_slice[0].start
-        source_cols = boundary_cols + source_slice[1].start
-        source_flat = source_rows * width + source_cols
+        source_flat = (
+            (boundary_rows + source_slice[0].start).astype(np.int64) * width
+            + boundary_cols
+            + source_slice[1].start
+        )
         target_flat = source_flat + row_offset * width + col_offset
-        pair_key = source_flat.astype(np.int64) * total_cells + target_flat
-        ids = basin_ids[at_lowest_saddle]
-        keys = pair_key[at_lowest_saddle]
-        np.minimum.at(best_any_pair, ids, keys)
-        pointer_values = pointer[source_slice][boundary]
-        follows_saddle = at_lowest_saddle & (pointer_values == code)
-        if follows_saddle.any():
-            np.minimum.at(
-                best_pair,
-                basin_ids[follows_saddle],
-                pair_key[follows_saddle],
-            )
+        id_parts.append(source_labels[boundary])
+        saddle_parts.append(
+            np.maximum(surface[source_slice][boundary], surface[target_slice][boundary])
+        )
+        key_parts.append(source_flat * total_cells + target_flat)
+        follow_parts.append(pointer[source_slice][boundary] == code)
+        if accumulation is None:
+            area_parts.append(np.zeros(int(boundary.sum()), dtype=np.float64))
+        else:
+            area_parts.append(accumulation[source_slice][boundary].astype(np.float64))
 
-    selected_pair = np.where(
-        best_pair != np.iinfo(np.int64).max, best_pair, best_any_pair
-    )
+    spill_levels = np.full(basin_count + 1, np.inf, dtype=np.float64)
     outlet_inside = np.full(basin_count + 1, -1, dtype=np.int64)
     outlet_outside = np.full(basin_count + 1, -1, dtype=np.int64)
-    has_outlet = selected_pair != np.iinfo(np.int64).max
-    outlet_inside[has_outlet] = selected_pair[has_outlet] // total_cells
-    outlet_outside[has_outlet] = selected_pair[has_outlet] % total_cells
+    if id_parts:
+        ids = np.concatenate(id_parts)
+        saddle = np.concatenate(saddle_parts).astype(np.float64)
+        keys = np.concatenate(key_parts)
+        follows = np.concatenate(follow_parts)
+        areas = np.concatenate(area_parts)
+        np.minimum.at(spill_levels, ids, saddle)
+
+        # Ties are detected within a few float32 ulps of the elevation scale.
+        scale = float(np.max(np.abs(surface[valid]))) if valid.any() else 1.0
+        tie_atol = max(1e-6, 4.0 * float(np.finfo(np.float32).eps) * max(scale, 1.0))
+        int_max = np.iinfo(np.int64).max
+        follow_ok = follows & (saddle <= spill_levels[ids] + OUTLET_FOLLOW_TOLERANCE_M)
+        best_area = np.full(basin_count + 1, -np.inf, dtype=np.float64)
+        np.maximum.at(best_area, ids[follow_ok], areas[follow_ok])
+        chosen_follow = follow_ok & (areas >= best_area[ids])
+        best_follow = np.full(basin_count + 1, int_max, dtype=np.int64)
+        np.minimum.at(best_follow, ids[chosen_follow], keys[chosen_follow])
+        at_lowest = saddle <= spill_levels[ids] + tie_atol
+        best_any = np.full(basin_count + 1, int_max, dtype=np.int64)
+        np.minimum.at(best_any, ids[at_lowest], keys[at_lowest])
+        selected_pair = np.where(best_follow != int_max, best_follow, best_any)
+        has_outlet = selected_pair != int_max
+        outlet_inside[has_outlet] = selected_pair[has_outlet] // total_cells
+        outlet_outside[has_outlet] = selected_pair[has_outlet] % total_cells
+    else:
+        has_outlet = np.zeros(basin_count + 1, dtype=bool)
     touches_invalid[~has_outlet] = True
     return spill_levels, outlet_inside, outlet_outside, touches_invalid
+
+
+def _trace_downstream(
+    start: int,
+    source_basin: int,
+    labels: np.ndarray,
+    pointer: np.ndarray,
+    valid: np.ndarray,
+    max_steps: int,
+) -> tuple[int, str, int, int]:
+    """Trace D8 from a spill saddle to the next retained basin.
+
+    Returns ``(basin_id, reason, last_cell, steps)``; ``basin_id`` is 0 unless
+    the trace reaches another retained basin. ``last_cell`` is the flat index of
+    the last in-raster cell examined. The trace stops at another retained basin,
+    at a cycle, at the raster edge, at NoData, or where no flow direction exists.
+    """
+    height, width = labels.shape
+    row, col = divmod(int(start), width)
+    visited: set[int] = set()
+    last = int(start)
+    for step in range(max_steps):
+        if row < 0 or row >= height or col < 0 or col >= width:
+            return 0, TRACE_EDGE, last, step
+        last = row * width + col
+        if not valid[row, col]:
+            return 0, TRACE_NODATA, last, step
+        basin = int(labels[row, col])
+        if basin > 0 and basin != source_basin:
+            return basin, TRACE_BASIN, last, step
+        # Cells of the source basin are passed through: the path may cross its
+        # own basin before leaving it for good. D8 is acyclic, so a revisited
+        # cell means corrupt flow directions.
+        if last in visited:
+            return 0, TRACE_CYCLE, last, step
+        visited.add(last)
+        offset = D8_OFFSETS.get(int(pointer[row, col]))
+        if offset is None:
+            # A border cell without a flow direction drains out of the raster.
+            on_border = row in (0, height - 1) or col in (0, width - 1)
+            reason = TRACE_EDGE if on_border else TRACE_NO_FLOW
+            return 0, reason, last, step
+        row += offset[0]
+        col += offset[1]
+    return 0, TRACE_MAX_STEPS, last, max_steps
 
 
 def _downstream_basin(
@@ -186,25 +387,12 @@ def _downstream_basin(
     pointer: np.ndarray,
     valid: np.ndarray,
     max_steps: int,
-) -> int:
-    """Trace D8 from a spill saddle to the next retained basin or raster edge."""
-    height, width = labels.shape
-    row, col = divmod(int(start), width)
-    for _ in range(max_steps):
-        if row < 0 or row >= height or col < 0 or col >= width:
-            return 0
-        if not valid[row, col]:
-            return 0
-        basin = int(labels[row, col])
-        if basin > 0 and basin != source_basin:
-            return basin
-        code = int(pointer[row, col])
-        offset = D8_OFFSETS.get(code)
-        if offset is None:
-            return 0
-        row += offset[0]
-        col += offset[1]
-    return 0
+) -> tuple[int, str]:
+    """Return ``(basin_id, reason)`` of :func:`_trace_downstream`."""
+    basin, reason, _last, _steps = _trace_downstream(
+        start, source_basin, labels, pointer, valid, max_steps
+    )
+    return basin, reason
 
 
 def _water_level_for_volume(
@@ -236,21 +424,47 @@ def _water_level_for_volume(
     return min(float(water_level), spill_level_m)
 
 
-def prepare_basin_network(
+# --------------------------------------------------------------------------
+# Shared network builder
+# --------------------------------------------------------------------------
+@dataclass
+class _BasinNetwork:
+    labels: np.ndarray
+    counts: np.ndarray
+    spill: np.ndarray
+    inside_outlet: np.ndarray
+    censored: np.ndarray
+    trace_reason: list[str]
+    trace_end: np.ndarray
+    trace_steps: np.ndarray
+    parent: np.ndarray
+    link_dropped: np.ndarray
+    dropped_receiver: np.ndarray
+    outlet_area: np.ndarray
+    local_area: np.ndarray
+    capacity: np.ndarray
+    min_elevation: np.ndarray
+    max_depth: np.ndarray
+    cell_area_m2: float
+    width: int
+
+    @property
+    def basin_count(self) -> int:
+        return self.counts.size - 1
+
+    @property
+    def closed(self) -> np.ndarray:
+        """Basins with a finite spill level that are not censored."""
+        return ~self.censored & np.isfinite(self.spill)
+
+
+def _validate_inputs(
     dem: np.ndarray,
     depression_depth: np.ndarray,
     d8_pointer: np.ndarray,
     contributing_area: np.ndarray,
     cell_area_m2: float,
-    minimum_depression_depth_m: float = 0.02,
-    minimum_basin_area_m2: float = 25.0,
-) -> tuple[np.ndarray, list[dict[str, float | int | str]]]:
-    """Prepare basin labels, capacities, and downstream topology without rainfall.
-
-    The returned records contain terrain/network properties suitable for
-    building a dynamic model. No static event volume or ponding estimate is
-    computed here.
-    """
+) -> None:
     if cell_area_m2 <= 0 or not np.isfinite(cell_area_m2):
         raise ValueError("Cell area must be finite and positive.")
     if not (
@@ -263,13 +477,48 @@ def prepare_basin_network(
             "DEM, depression, pointer, and contributing-area arrays must align."
         )
 
-    valid = (
-        np.isfinite(dem)
-        & np.isfinite(depression_depth)
-        & np.isfinite(d8_pointer)
-        & np.isfinite(contributing_area)
-        & (contributing_area >= 0)
+
+def _warn_if_accumulation_in_cells(
+    contributing_area: np.ndarray,
+    valid: np.ndarray,
+    cell_area_m2: float,
+    in_cells: bool,
+) -> None:
+    """Warn when the smallest positive accumulation looks like a cell count."""
+    if in_cells or cell_area_m2 <= 1.5:
+        return
+    positive = contributing_area[valid & (contributing_area > 0)]
+    if positive.size and float(positive.min()) < 0.5 * cell_area_m2:
+        warnings.warn(
+            "Contributing area looks like a cell count (smallest positive value "
+            f"{float(positive.min()):g} < cell area {cell_area_m2:g} m2). Pass "
+            "contributing_area_in_cells=True if it is not in m2.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+
+def _build_network(
+    dem: np.ndarray,
+    depression_depth: np.ndarray,
+    d8_pointer: np.ndarray,
+    contributing_area: np.ndarray,
+    cell_area_m2: float,
+    minimum_depression_depth_m: float,
+    minimum_basin_area_m2: float,
+    label_epsilon_m: float,
+    contributing_area_in_cells: bool,
+    dem_nodata: float | None,
+) -> _BasinNetwork:
+    """Label basins, find spill outlets and topology, and compute capacities."""
+    _validate_inputs(dem, depression_depth, d8_pointer, contributing_area, cell_area_m2)
+    height, width = dem.shape
+    valid = _valid_mask(dem, depression_depth, d8_pointer, contributing_area, dem_nodata)
+    _warn_if_accumulation_in_cells(
+        contributing_area, valid, cell_area_m2, contributing_area_in_cells
     )
+    area_scale = cell_area_m2 if contributing_area_in_cells else 1.0
+
     labels, counts = label_depression_components(
         dem,
         depression_depth,
@@ -277,99 +526,216 @@ def prepare_basin_network(
         cell_area_m2,
         minimum_depression_depth_m,
         minimum_basin_area_m2,
+        label_epsilon_m,
     )
-    basin_count = counts.size - 1
-    if basin_count == 0:
-        return labels, []
+    n = counts.size - 1
+    empty = np.zeros(n + 1)
+    if n == 0:
+        return _BasinNetwork(
+            labels, counts, np.full(1, np.inf), np.full(1, -1, dtype=np.int64),
+            np.zeros(1, dtype=bool), [""], np.full(1, -1, dtype=np.int64),
+            np.zeros(1, dtype=np.int32), np.zeros(1, dtype=np.int32),
+            np.zeros(1, dtype=bool), np.zeros(1, dtype=np.int32),
+            empty, empty, empty, empty, empty,
+            cell_area_m2, width,
+        )
 
+    surface = dem + depression_depth
     spill, inside_outlet, outside_outlet, censored = _find_spill_outlets(
-        dem, labels, valid, d8_pointer, counts
+        surface, labels, valid, d8_pointer, counts, contributing_area
     )
-    outlet_area = np.zeros(basin_count + 1, dtype=np.float64)
-    for basin_id in range(1, basin_count + 1):
-        inside = inside_outlet[basin_id]
-        if inside >= 0:
-            outlet_area[basin_id] = float(contributing_area.flat[inside])
+    del surface
 
-    parent = np.zeros(basin_count + 1, dtype=np.int32)
+    outlet_area = np.zeros(n + 1, dtype=np.float64)
+    has_inside = inside_outlet >= 0
+    flat_area = np.ravel(contributing_area)
+    outlet_area[has_inside] = (
+        flat_area[inside_outlet[has_inside]].astype(np.float64) * area_scale
+    )
+
+    parent = np.zeros(n + 1, dtype=np.int32)
+    reasons = [""] * (n + 1)
+    trace_end = np.full(n + 1, -1, dtype=np.int64)
+    trace_steps = np.zeros(n + 1, dtype=np.int32)
     max_steps = min(dem.size, 1_000_000)
-    for basin_id in range(1, basin_count + 1):
-        outside = outside_outlet[basin_id]
-        if outside >= 0 and not censored[basin_id]:
-            parent[basin_id] = _downstream_basin(
-                int(outside), basin_id, labels, d8_pointer, valid, max_steps
-            )
-        receiver = int(parent[basin_id])
-        if receiver > 0 and outlet_area[receiver] <= outlet_area[basin_id]:
-            parent[basin_id] = 0
+    for basin_id in range(1, n + 1):
+        if censored[basin_id] or not np.isfinite(spill[basin_id]):
+            reasons[basin_id] = "censored"
+            continue
+        outside = int(outside_outlet[basin_id])
+        if outside < 0:
+            reasons[basin_id] = "no_outlet"
+            continue
+        (
+            parent[basin_id],
+            reasons[basin_id],
+            trace_end[basin_id],
+            trace_steps[basin_id],
+        ) = _trace_downstream(
+            outside, basin_id, labels, d8_pointer, valid, max_steps
+        )
 
-    child_area = np.zeros(basin_count + 1, dtype=np.float64)
-    for basin_id in range(1, basin_count + 1):
-        receiver = int(parent[basin_id])
-        if receiver > 0:
-            child_area[receiver] += outlet_area[basin_id]
+    # A downstream node must have strictly more D8 contributing area; this also
+    # guarantees an acyclic graph. Links that violate it are dropped and counted.
+    has_parent = parent > 0
+    dropped = np.zeros(n + 1, dtype=bool)
+    dropped[has_parent] = outlet_area[parent[has_parent]] <= outlet_area[has_parent]
+    dropped_receiver = np.where(dropped, parent, 0).astype(np.int32)
+    parent[dropped] = 0
+    has_parent = parent > 0
+    child_area = np.bincount(
+        parent[has_parent], weights=outlet_area[has_parent], minlength=n + 1
+    )
     local_area = np.maximum(outlet_area - child_area, 0.0)
 
-    capacity = np.zeros(basin_count + 1, dtype=np.float64)
-    minimum_elevation = np.full(basin_count + 1, np.inf, dtype=np.float64)
-    flat_labels = labels.ravel()
-    flat_dem = dem.ravel()
-    for start in range(0, flat_labels.size, 1_000_000):
-        stop = min(start + 1_000_000, flat_labels.size)
-        ids = flat_labels[start:stop]
-        selected = ids > 0
-        if not selected.any():
-            continue
-        selected_ids = ids[selected]
-        elevations = flat_dem[start:stop][selected]
-        np.minimum.at(minimum_elevation, selected_ids, elevations)
-        closed = ~censored[selected_ids] & np.isfinite(spill[selected_ids])
-        if not closed.any():
-            continue
-        selected_ids = selected_ids[closed]
-        elevations = elevations[closed]
-        depths_to_spill = np.maximum(spill[selected_ids] - elevations, 0.0)
-        capacity += np.bincount(
-            selected_ids,
-            weights=depths_to_spill * cell_area_m2,
-            minlength=basin_count + 1,
+    if dropped.any():
+        warnings.warn(
+            f"{int(dropped.sum())} downstream basin link(s) were dropped because the "
+            "receiver has no larger contributing area; their overflow leaves the "
+            "system (status 'spill_link_dropped').",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    unresolved_counts = Counter(
+        r for r in reasons if r in (TRACE_NO_FLOW, TRACE_CYCLE, TRACE_MAX_STEPS)
+    )
+    if unresolved_counts:
+        breakdown = ", ".join(f"{k}: {v}" for k, v in unresolved_counts.most_common())
+        warnings.warn(
+            f"{sum(unresolved_counts.values())} spill path(s) ended without reaching "
+            f"a basin, the edge or NoData ({breakdown}); status 'spill_path_unresolved'.",
+            RuntimeWarning,
+            stacklevel=3,
         )
 
-    records: list[dict[str, float | int | str]] = []
-    for basin_id in range(1, basin_count + 1):
-        inside = int(inside_outlet[basin_id])
-        outlet_row, outlet_col = (
-            divmod(inside, dem.shape[1]) if inside >= 0 else (-1, -1)
+    closed = ~censored & np.isfinite(spill)
+    capacity = np.zeros(n + 1, dtype=np.float64)
+    min_elevation = np.full(n + 1, np.inf, dtype=np.float64)
+    block = _row_block(width)
+    for r0 in range(0, height, block):
+        r1 = min(r0 + block, height)
+        block_labels = labels[r0:r1]
+        selected = block_labels > 0
+        if not selected.any():
+            continue
+        ids = block_labels[selected]
+        elevations = dem[r0:r1][selected]
+        np.minimum.at(min_elevation, ids, elevations)
+        in_closed = closed[ids]
+        if not in_closed.any():
+            continue
+        ids_c = ids[in_closed]
+        depth_to_spill = np.maximum(spill[ids_c] - elevations[in_closed], 0.0)
+        capacity += np.bincount(
+            ids_c, weights=depth_to_spill * cell_area_m2, minlength=n + 1
         )
-        receiver = int(parent[basin_id])
-        if censored[basin_id] or not np.isfinite(spill[basin_id]):
-            status = "edge_or_nodata_censored"
-        elif outlet_area[basin_id] <= 0:
-            status = "no_contributing_area"
-        elif receiver > 0:
-            status = "spills_to_basin"
-        else:
-            status = "spills_out_of_analysis_area"
-        records.append(
-            {
-                "basin_id": basin_id,
-                "cell_count": int(counts[basin_id]),
-                "depression_area_m2": float(counts[basin_id] * cell_area_m2),
-                # Censored basins are routed to the model boundary, not treated
-                # as storage nodes; use a finite placeholder for CSV consumers.
-                "spill_elevation_m": float(spill[basin_id])
-                if np.isfinite(spill[basin_id])
-                else float(minimum_elevation[basin_id]),
-                "capacity_m3": float(capacity[basin_id]),
-                "contributing_area_m2": float(outlet_area[basin_id]),
-                "incremental_contributing_area_m2": float(local_area[basin_id]),
-                "downstream_basin_id": receiver,
-                "outlet_row": outlet_row,
-                "outlet_col": outlet_col,
-                "status": status,
-            }
-        )
-    return labels, records
+    min_elevation[~np.isfinite(min_elevation)] = np.nan
+
+    max_depth = np.zeros(n + 1, dtype=np.float64)
+    max_depth[1:] = ndimage.maximum(
+        depression_depth, labels, index=np.arange(1, n + 1)
+    )
+
+    return _BasinNetwork(
+        labels=labels,
+        counts=counts,
+        spill=spill,
+        inside_outlet=inside_outlet,
+        censored=censored,
+        trace_reason=reasons,
+        trace_end=trace_end,
+        trace_steps=trace_steps,
+        parent=parent,
+        link_dropped=dropped,
+        dropped_receiver=dropped_receiver,
+        outlet_area=outlet_area,
+        local_area=local_area,
+        capacity=capacity,
+        min_elevation=min_elevation,
+        max_depth=max_depth,
+        cell_area_m2=cell_area_m2,
+        width=width,
+    )
+
+
+def _status(net: _BasinNetwork, basin_id: int) -> str:
+    if net.censored[basin_id] or not np.isfinite(net.spill[basin_id]):
+        return STATUS_CENSORED
+    if net.outlet_area[basin_id] <= 0:
+        return STATUS_NO_AREA
+    if net.parent[basin_id] > 0:
+        return STATUS_TO_BASIN
+    if net.link_dropped[basin_id]:
+        return STATUS_DROPPED
+    if net.trace_reason[basin_id] in _OPEN_END_REASONS:
+        return STATUS_OUT
+    return STATUS_UNRESOLVED
+
+
+def _network_record(net: _BasinNetwork, basin_id: int) -> BasinRecord:
+    inside = int(net.inside_outlet[basin_id])
+    outlet_row, outlet_col = (
+        divmod(inside, net.width) if inside >= 0 else (-1, -1)
+    )
+    spill = float(net.spill[basin_id])
+    if net.censored[basin_id]:
+        spill = math.nan
+    return BasinRecord(
+        basin_id=basin_id,
+        cell_count=int(net.counts[basin_id]),
+        depression_area_m2=float(net.counts[basin_id] * net.cell_area_m2),
+        max_depression_depth_m=float(net.max_depth[basin_id]),
+        min_elevation_m=float(net.min_elevation[basin_id]),
+        spill_elevation_m=spill if np.isfinite(spill) else math.nan,
+        capacity_m3=float(net.capacity[basin_id]),
+        contributing_area_m2=float(net.outlet_area[basin_id]),
+        incremental_contributing_area_m2=float(net.local_area[basin_id]),
+        downstream_basin_id=int(net.parent[basin_id]),
+        downstream_link_dropped=int(net.link_dropped[basin_id]),
+        dropped_receiver_id=int(net.dropped_receiver[basin_id]),
+        spill_trace_end=net.trace_reason[basin_id],
+        outlet_row=outlet_row,
+        outlet_col=outlet_col,
+        status=_status(net, basin_id),
+    )
+
+
+# --------------------------------------------------------------------------
+# Public array-level API
+# --------------------------------------------------------------------------
+def prepare_basin_network(
+    dem: np.ndarray,
+    depression_depth: np.ndarray,
+    d8_pointer: np.ndarray,
+    contributing_area: np.ndarray,
+    cell_area_m2: float,
+    minimum_depression_depth_m: float = 0.02,
+    minimum_basin_area_m2: float = 25.0,
+    label_epsilon_m: float = LABEL_EPSILON_M,
+    contributing_area_in_cells: bool = False,
+    dem_nodata: float | None = None,
+) -> tuple[np.ndarray, list[BasinRecord]]:
+    """Prepare basin labels, capacities, and downstream topology without rainfall.
+
+    The returned records contain terrain/network properties suitable for
+    building a dynamic model. No static event volume or ponding estimate is
+    computed here. ``spill_elevation_m`` is NaN for censored basins; their
+    lowest cell elevation is in ``min_elevation_m``.
+    """
+    net = _build_network(
+        dem,
+        depression_depth,
+        d8_pointer,
+        contributing_area,
+        cell_area_m2,
+        minimum_depression_depth_m,
+        minimum_basin_area_m2,
+        label_epsilon_m,
+        contributing_area_in_cells,
+        dem_nodata,
+    )
+    records = [_network_record(net, b) for b in range(1, net.basin_count + 1)]
+    return net.labels, records
 
 
 def simulate_basin_storage_spill(
@@ -381,7 +747,10 @@ def simulate_basin_storage_spill(
     effective_rain_m: float,
     minimum_depression_depth_m: float = 0.02,
     minimum_basin_area_m2: float = 25.0,
-) -> tuple[np.ndarray, np.ndarray, list[dict[str, float | int | str]]]:
+    label_epsilon_m: float = LABEL_EPSILON_M,
+    contributing_area_in_cells: bool = False,
+    dem_nodata: float | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[BasinRecord]]:
     """Simulate static event volume filling DEM depressions and spilling onward.
 
     Depression fill zones are treated as 8-connected basin components; this is
@@ -394,187 +763,185 @@ def simulate_basin_storage_spill(
     This is a static DEM-only screening balance: it has no storm timing,
     infiltration variability, culverts, or surface-water hydraulics.
     """
-    if cell_area_m2 <= 0 or not np.isfinite(cell_area_m2):
-        raise ValueError("Cell area must be finite and positive.")
     if effective_rain_m < 0 or not np.isfinite(effective_rain_m):
         raise ValueError("Effective rainfall must be finite and non-negative.")
-    if not (
-        dem.shape
-        == depression_depth.shape
-        == d8_pointer.shape
-        == contributing_area.shape
-    ):
-        raise ValueError(
-            "DEM, depression, pointer, and contributing-area arrays must align."
-        )
-
-    valid = (
-        np.isfinite(dem)
-        & np.isfinite(depression_depth)
-        & np.isfinite(d8_pointer)
-        & np.isfinite(contributing_area)
-        & (contributing_area >= 0)
-    )
-    labels, counts = label_depression_components(
+    net = _build_network(
         dem,
         depression_depth,
-        valid,
+        d8_pointer,
+        contributing_area,
         cell_area_m2,
         minimum_depression_depth_m,
         minimum_basin_area_m2,
+        label_epsilon_m,
+        contributing_area_in_cells,
+        dem_nodata,
     )
-    basin_count = counts.size - 1
+    n = net.basin_count
     depths = np.zeros(dem.shape, dtype=np.float32)
-    if basin_count == 0:
-        return labels, depths, []
+    if n == 0:
+        return net.labels, depths, []
 
-    spill, inside_outlet, outside_outlet, censored = _find_spill_outlets(
-        dem, labels, valid, d8_pointer, counts
-    )
-    outlet_area = np.zeros(basin_count + 1, dtype=np.float64)
-    for basin_id in range(1, basin_count + 1):
-        inside = inside_outlet[basin_id]
-        if inside >= 0:
-            outlet_area[basin_id] = float(contributing_area.flat[inside])
-
-    parent = np.zeros(basin_count + 1, dtype=np.int32)
-    max_steps = min(dem.size, 1_000_000)
-    for basin_id in range(1, basin_count + 1):
-        outside = outside_outlet[basin_id]
-        if outside >= 0 and not censored[basin_id]:
-            parent[basin_id] = _downstream_basin(
-                int(outside),
-                basin_id,
-                labels,
-                d8_pointer,
-                valid,
-                max_steps,
-            )
-        receiver = int(parent[basin_id])
-        if receiver > 0 and outlet_area[receiver] <= outlet_area[basin_id]:
-            # A downstream node must have at least as much D8 contributing area.
-            parent[basin_id] = 0
-
-    child_area = np.zeros(basin_count + 1, dtype=np.float64)
-    for basin_id in range(1, basin_count + 1):
-        receiver = int(parent[basin_id])
-        if receiver > 0:
-            child_area[receiver] += outlet_area[basin_id]
-
-    local_area = np.maximum(outlet_area - child_area, 0.0)
-    local_volume = local_area * effective_rain_m
-    capacity = np.zeros(basin_count + 1, dtype=np.float64)
-    flat_labels = labels.ravel()
-    flat_dem = dem.ravel()
-    for start in range(0, flat_labels.size, 1_000_000):
-        stop = min(start + 1_000_000, flat_labels.size)
-        ids = flat_labels[start:stop]
-        selected = ids > 0
-        if not selected.any():
-            continue
-        selected_ids = ids[selected]
-        elevations = flat_dem[start:stop][selected]
-        depths_to_spill = np.maximum(spill[selected_ids] - elevations, 0.0)
-        capacity += np.bincount(
-            selected_ids,
-            weights=depths_to_spill * cell_area_m2,
-            minlength=basin_count + 1,
-        )
+    local_volume = net.local_area * effective_rain_m
     incoming = local_volume.copy()
-    retained = np.zeros(basin_count + 1, dtype=np.float64)
-    spill_volume = np.zeros(basin_count + 1, dtype=np.float64)
-    water_levels = np.full(basin_count + 1, np.nan, dtype=np.float64)
-    # Flow accumulation normally increases downstream, providing a topological
-    # order for this acyclic D8-derived basin graph.
-    processing_order = np.argsort(outlet_area, kind="stable")
-    for basin_id in processing_order:
+    retained = np.zeros(n + 1, dtype=np.float64)
+    spill_volume = np.zeros(n + 1, dtype=np.float64)
+    closed = net.closed
+    # Strictly increasing outlet area downstream gives a topological order.
+    for basin_id in np.argsort(net.outlet_area, kind="stable"):
         if basin_id == 0:
             continue
-        if censored[basin_id] or not np.isfinite(spill[basin_id]):
+        if not closed[basin_id]:
             spill_volume[basin_id] = incoming[basin_id]
-        else:
-            retained[basin_id] = min(incoming[basin_id], capacity[basin_id])
-            spill_volume[basin_id] = max(incoming[basin_id] - retained[basin_id], 0.0)
-            receiver = int(parent[basin_id])
-            if receiver > 0:
-                incoming[receiver] += spill_volume[basin_id]
+            continue
+        retained[basin_id] = min(incoming[basin_id], net.capacity[basin_id])
+        spill_volume[basin_id] = max(incoming[basin_id] - retained[basin_id], 0.0)
+        receiver = int(net.parent[basin_id])
+        if receiver > 0:
+            incoming[receiver] += spill_volume[basin_id]
 
-    # Sort basin-cell elevations once by label; solve each basin's curve using
-    # its sorted cell heights, then rasterize the resulting level per basin.
-    cell_indices = np.flatnonzero(flat_labels)
-    cell_ids = flat_labels[cell_indices]
-    sort_order = np.argsort(cell_ids, kind="stable")
-    sorted_elevations = flat_dem[cell_indices[sort_order]].astype(np.float64)
-    del cell_indices, cell_ids, sort_order
-    offsets = np.cumsum(counts[1:], dtype=np.int64)
-    for basin_id in range(1, basin_count + 1):
-        start = 0 if basin_id == 1 else int(offsets[basin_id - 2])
-        stop = int(offsets[basin_id - 1])
-        basin_elevations = np.sort(sorted_elevations[start:stop])
-        if not censored[basin_id] and np.isfinite(spill[basin_id]):
-            water_levels[basin_id] = _water_level_for_volume(
-                basin_elevations,
-                retained[basin_id],
-                cell_area_m2,
-                spill[basin_id],
-            )
+    exported = float(spill_volume[1:][net.parent[1:] == 0].sum())
+    balance = float(local_volume.sum()) - float(retained.sum()) - exported
+    if abs(balance) > 1e-6 * max(1.0, float(local_volume.sum())):
+        warnings.warn(
+            f"Volume balance residual {balance:.6g} m3 (runoff - retained - exported).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    # Per-basin stage-storage inversion on cell elevations sorted by (label, z).
+    water_levels = np.full(n + 1, np.nan, dtype=np.float64)
+    cell_mask = net.labels > 0
+    ids = net.labels[cell_mask]
+    elevations = dem[cell_mask].astype(np.float64)
+    order = np.lexsort((elevations, ids))
+    sorted_elevations = elevations[order]
+    del cell_mask, ids, elevations, order
+    offsets = np.concatenate(([0], np.cumsum(net.counts[1:], dtype=np.int64)))
+    for basin_id in range(1, n + 1):
+        if not closed[basin_id]:
+            continue
+        cells = sorted_elevations[offsets[basin_id - 1] : offsets[basin_id]]
+        water_levels[basin_id] = _water_level_for_volume(
+            cells, retained[basin_id], cell_area_m2, net.spill[basin_id]
+        )
 
     # Rasterized water depth is zero outside retained, closed depression basins.
-    flat_depths = depths.ravel()
-    for start in range(0, flat_labels.size, 1_000_000):
-        stop = min(start + 1_000_000, flat_labels.size)
-        ids = flat_labels[start:stop]
-        selected = ids > 0
+    height, width = dem.shape
+    block = _row_block(width)
+    for r0 in range(0, height, block):
+        r1 = min(r0 + block, height)
+        block_labels = net.labels[r0:r1]
+        selected = block_labels > 0
         if not selected.any():
             continue
-        selected_ids = ids[selected]
-        elevations = flat_dem[start:stop][selected]
-        levels = water_levels[selected_ids]
+        levels = water_levels[block_labels[selected]]
+        cell_elev = dem[r0:r1][selected]
         wet = np.isfinite(levels)
-        result = np.zeros(selected_ids.shape, dtype=np.float32)
-        result[wet] = np.maximum(levels[wet] - elevations[wet], 0.0).astype(np.float32)
-        flat_depths[start:stop][selected] = result
+        result = np.zeros(levels.shape, dtype=np.float32)
+        result[wet] = np.maximum(levels[wet] - cell_elev[wet], 0.0).astype(np.float32)
+        depths[r0:r1][selected] = result
 
-    summaries: list[dict[str, float | int | str]] = []
-    for basin_id in range(1, basin_count + 1):
-        inside = int(inside_outlet[basin_id])
-        if inside >= 0:
-            outlet_row, outlet_col = divmod(inside, dem.shape[1])
-        else:
-            outlet_row, outlet_col = -1, -1
-        receiver = int(parent[basin_id])
-        if censored[basin_id] or not np.isfinite(spill[basin_id]):
-            status = "edge_or_nodata_censored"
-        elif outlet_area[basin_id] <= 0:
-            status = "no_contributing_area"
-        elif receiver > 0:
-            status = "spills_to_basin"
-        else:
-            status = "spills_out_of_analysis_area"
-        summaries.append(
-            {
-                "basin_id": basin_id,
-                "cell_count": int(counts[basin_id]),
-                "depression_area_m2": float(counts[basin_id] * cell_area_m2),
-                "spill_elevation_m": float(spill[basin_id])
-                if np.isfinite(spill[basin_id])
-                else math.nan,
-                "capacity_m3": float(capacity[basin_id]),
-                "contributing_area_m2": float(outlet_area[basin_id]),
-                "incremental_contributing_area_m2": float(local_area[basin_id]),
-                "local_event_runoff_m3": float(local_volume[basin_id]),
-                "incoming_volume_m3": float(incoming[basin_id]),
-                "retained_volume_m3": float(retained[basin_id]),
-                "spill_volume_m3": float(spill_volume[basin_id]),
-                "water_level_m": float(water_levels[basin_id]),
-                "effective_rainfall_m": float(effective_rain_m),
-                "downstream_basin_id": receiver,
-                "outlet_row": outlet_row,
-                "outlet_col": outlet_col,
-                "status": status,
-            }
+    summaries: list[BasinRecord] = []
+    for basin_id in range(1, n + 1):
+        record = _network_record(net, basin_id)
+        record.update(
+            local_event_runoff_m3=float(local_volume[basin_id]),
+            incoming_volume_m3=float(incoming[basin_id]),
+            retained_volume_m3=float(retained[basin_id]),
+            spill_volume_m3=float(spill_volume[basin_id]),
+            water_level_m=float(water_levels[basin_id]),
+            effective_rainfall_m=float(effective_rain_m),
         )
-    return labels, depths, summaries
+        summaries.append(record)
+    return net.labels, depths, summaries
+
+
+# --------------------------------------------------------------------------
+# Raster / CSV I/O
+# --------------------------------------------------------------------------
+def _masked_float32(array: np.ndarray, nodata: float | None) -> np.ndarray:
+    """Return float32 data with a finite NoData value replaced by NaN."""
+    data = array.astype(np.float32, copy=False)
+    if nodata is not None and np.isfinite(nodata):
+        data = np.where(data == np.float32(nodata), np.float32(np.nan), data)
+    return data
+
+
+@dataclass
+class _Inputs:
+    dem: np.ndarray
+    depression: np.ndarray
+    pointer: np.ndarray
+    accumulation: np.ndarray
+    nodata: float | None
+    cell_area: float
+    transform: object
+    crs: object
+    profile: dict
+
+
+def _read_inputs(
+    dem_path: Path,
+    depression_depth_path: Path,
+    d8_pointer_path: Path,
+    contributing_area_path: Path,
+    description: str,
+) -> _Inputs:
+    with rasterio.open(dem_path) as dem_source:
+        arrays = []
+        for path in (depression_depth_path, d8_pointer_path, contributing_area_path):
+            with rasterio.open(path) as source:
+                if (
+                    source.shape != dem_source.shape
+                    or source.transform != dem_source.transform
+                    or source.crs != dem_source.crs
+                ):
+                    raise ValueError(f"{description} raster is not aligned: {path}")
+                arrays.append(_masked_float32(source.read(1), source.nodata))
+        dem = _masked_float32(dem_source.read(1), dem_source.nodata)
+        transform = dem_source.transform
+        return _Inputs(
+            dem=dem,
+            depression=arrays[0],
+            pointer=arrays[1],
+            accumulation=arrays[2],
+            nodata=dem_source.nodata,
+            cell_area=abs(transform.a * transform.e - transform.b * transform.d),
+            transform=transform,
+            crs=dem_source.crs,
+            profile=dem_source.profile.copy(),
+        )
+
+
+def _add_outlet_coordinates(
+    summaries: list[BasinRecord], transform: object, crs: object
+) -> None:
+    for summary in summaries:
+        row, col = int(summary["outlet_row"]), int(summary["outlet_col"])
+        if row >= 0 and col >= 0:
+            outlet_x, outlet_y = rasterio.transform.xy(transform, row, col, offset="center")
+        else:
+            outlet_x, outlet_y = math.nan, math.nan
+        summary["outlet_x"] = float(outlet_x)
+        summary["outlet_y"] = float(outlet_y)
+        summary["crs"] = str(crs)
+
+
+def _write_csv(path: Path, fields: list[str], rows: list[BasinRecord]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _tiled_profile(profile: dict, dtype: str, nodata: float | int) -> dict:
+    out = profile.copy()
+    out.update(driver="GTiff", count=1, dtype=dtype, nodata=nodata, compress="lzw", tiled=True)
+    out.pop("blockxsize", None)
+    out.pop("blockysize", None)
+    return out
 
 
 def write_basin_network_outputs(
@@ -586,92 +953,46 @@ def write_basin_network_outputs(
     basin_summary_path: Path,
     minimum_depression_depth_m: float = 0.02,
     minimum_basin_area_m2: float = 25.0,
-) -> list[dict[str, float | int | str]]:
+    label_epsilon_m: float = LABEL_EPSILON_M,
+    contributing_area_in_cells: bool = False,
+) -> list[BasinRecord]:
     """Write basin labels and network properties without a rainfall scenario."""
-    paths = (depression_depth_path, d8_pointer_path, contributing_area_path)
-    with rasterio.open(dem_path) as dem_source:
-        arrays = []
-        for path in paths:
-            with rasterio.open(path) as source:
-                if (
-                    source.shape != dem_source.shape
-                    or source.transform != dem_source.transform
-                    or source.crs != dem_source.crs
-                ):
-                    raise ValueError(f"Basin preparation raster is not aligned: {path}")
-                arrays.append(source.read(1).astype(np.float32, copy=False))
-        dem = dem_source.read(1).astype(np.float32, copy=False)
-        cell_area = abs(
-            dem_source.transform.a * dem_source.transform.e
-            - dem_source.transform.b * dem_source.transform.d
-        )
-        transform = dem_source.transform
-        crs = dem_source.crs
-        profile = dem_source.profile.copy()
-
+    data = _read_inputs(
+        dem_path,
+        depression_depth_path,
+        d8_pointer_path,
+        contributing_area_path,
+        "Basin preparation",
+    )
     labels, summaries = prepare_basin_network(
-        dem,
-        arrays[0],
-        arrays[1],
-        arrays[2],
-        cell_area,
+        data.dem,
+        data.depression,
+        data.pointer,
+        data.accumulation,
+        data.cell_area,
         minimum_depression_depth_m,
         minimum_basin_area_m2,
+        label_epsilon_m,
+        contributing_area_in_cells,
     )
-    for summary in summaries:
-        row, col = int(summary["outlet_row"]), int(summary["outlet_col"])
-        if row >= 0 and col >= 0:
-            outlet_x, outlet_y = transform * (col + 0.5, row + 0.5)
-        else:
-            outlet_x, outlet_y = math.nan, math.nan
-        summary["outlet_x"] = float(outlet_x)
-        summary["outlet_y"] = float(outlet_y)
-        summary["crs"] = str(crs)
+    _add_outlet_coordinates(summaries, data.transform, data.crs)
 
     basin_id_path.parent.mkdir(parents=True, exist_ok=True)
-    label_profile = profile.copy()
-    label_profile.update(
-        driver="GTiff", count=1, dtype="int32", nodata=0, compress="lzw", tiled=True
-    )
-    label_profile.pop("blockxsize", None)
-    label_profile.pop("blockysize", None)
-    with rasterio.open(basin_id_path, "w", **label_profile) as basin_dest:
+    with rasterio.open(
+        basin_id_path, "w", **_tiled_profile(data.profile, "int32", 0)
+    ) as basin_dest:
         basin_dest.update_tags(
             model="dem_derived_basin_network_preparation",
             minimum_depression_depth_m=f"{minimum_depression_depth_m:.9g}",
             minimum_basin_area_m2=f"{minimum_basin_area_m2:.9g}",
+            label_epsilon_m=f"{label_epsilon_m:.9g}",
             limitations=(
                 "8-connected depression-fill components and D8-derived spill graph; "
                 "not a nested depression hierarchy. No rainfall or event simulation."
             ),
         )
         basin_dest.write(labels, 1)
-
-    basin_summary_path.parent.mkdir(parents=True, exist_ok=True)
-    fields = (
-        list(summaries[0])
-        if summaries
-        else [
-            "basin_id",
-            "cell_count",
-            "depression_area_m2",
-            "spill_elevation_m",
-            "capacity_m3",
-            "contributing_area_m2",
-            "incremental_contributing_area_m2",
-            "downstream_basin_id",
-            "outlet_row",
-            "outlet_col",
-            "status",
-            "outlet_x",
-            "outlet_y",
-            "crs",
-        ]
-    )
-    with basin_summary_path.open("w", newline="", encoding="utf-8") as summary_file:
-        writer = csv.DictWriter(summary_file, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(summaries)
+    _write_csv(basin_summary_path, NETWORK_FIELDS, summaries)
     return summaries
 
 
@@ -686,118 +1007,75 @@ def write_basin_storage_spill_outputs(
     effective_rain_m: float,
     minimum_depression_depth_m: float = 0.02,
     minimum_basin_area_m2: float = 25.0,
-) -> list[dict[str, float | int | str]]:
+    label_epsilon_m: float = LABEL_EPSILON_M,
+    contributing_area_in_cells: bool = False,
+    scenario_tags: dict[str, str] | None = None,
+) -> list[BasinRecord]:
     """Create basin-ID, ponding-depth, and per-basin CSV outputs."""
-    paths = (depression_depth_path, d8_pointer_path, contributing_area_path)
-    with rasterio.open(dem_path) as dem_source:
-        arrays = []
-        for path in paths:
-            with rasterio.open(path) as source:
-                if (
-                    source.shape != dem_source.shape
-                    or source.transform != dem_source.transform
-                    or source.crs != dem_source.crs
-                ):
-                    raise ValueError(f"Scenario input raster is not aligned: {path}")
-                arrays.append(source.read(1).astype(np.float32, copy=False))
-        dem = dem_source.read(1).astype(np.float32, copy=False)
-        nodata = dem_source.nodata
-        cell_area = abs(
-            dem_source.transform.a * dem_source.transform.e
-            - dem_source.transform.b * dem_source.transform.d
-        )
-        transform = dem_source.transform
-        crs = dem_source.crs
-        profile = dem_source.profile.copy()
-
-    depression, pointer, accumulation = arrays
-    if nodata is None:
-        valid_dem = np.isfinite(dem)
-    else:
-        valid_dem = np.isfinite(dem) & (dem != nodata)
+    data = _read_inputs(
+        dem_path,
+        depression_depth_path,
+        d8_pointer_path,
+        contributing_area_path,
+        "Scenario input",
+    )
     labels, depths, summaries = simulate_basin_storage_spill(
-        dem,
-        depression,
-        pointer,
-        accumulation,
-        cell_area,
+        data.dem,
+        data.depression,
+        data.pointer,
+        data.accumulation,
+        data.cell_area,
         effective_rain_m,
         minimum_depression_depth_m,
         minimum_basin_area_m2,
+        label_epsilon_m,
+        contributing_area_in_cells,
     )
-    for summary in summaries:
-        outlet_row = int(summary["outlet_row"])
-        outlet_col = int(summary["outlet_col"])
-        if outlet_row >= 0 and outlet_col >= 0:
-            outlet_x, outlet_y = transform * (outlet_col + 0.5, outlet_row + 0.5)
-        else:
-            outlet_x, outlet_y = math.nan, math.nan
-        summary["outlet_x"] = float(outlet_x)
-        summary["outlet_y"] = float(outlet_y)
-        summary["crs"] = str(crs)
+    _add_outlet_coordinates(summaries, data.transform, data.crs)
 
     ponding_depth_path.parent.mkdir(parents=True, exist_ok=True)
     basin_id_path.parent.mkdir(parents=True, exist_ok=True)
-    depth_profile = profile.copy()
-    depth_profile.update(
-        driver="GTiff",
-        count=1,
-        dtype="float32",
-        nodata=nodata if nodata is not None else -9999.0,
-        compress="lzw",
-        tiled=True,
-    )
-    label_profile = profile.copy()
-    label_profile.update(
-        driver="GTiff",
-        count=1,
-        dtype="int32",
-        nodata=0,
-        compress="lzw",
-        tiled=True,
-    )
-    depth_profile.pop("blockxsize", None)
-    depth_profile.pop("blockysize", None)
-    label_profile.pop("blockxsize", None)
-    label_profile.pop("blockysize", None)
+    depth_nodata = data.nodata if data.nodata is not None else -9999.0
+    depth_profile = _tiled_profile(data.profile, "float32", depth_nodata)
+    label_profile = _tiled_profile(data.profile, "int32", 0)
+    valid_dem = np.isfinite(data.dem)
+    tags = {
+        "model": "static_dem_d8_depression_storage_spill_screening",
+        "effective_rainfall_m": f"{effective_rain_m:.9g}",
+        "minimum_depression_depth_m": f"{minimum_depression_depth_m:.9g}",
+        "minimum_basin_area_m2": f"{minimum_basin_area_m2:.9g}",
+        "label_epsilon_m": f"{label_epsilon_m:.9g}",
+        "depth_units": "m",
+        "limitations": (
+            "Static D8 screening using connected fill-zone components, not "
+            "a nested depression hierarchy; no storm timing, spatial "
+            "infiltration, culverts, sewers, or hydraulic routing."
+        ),
+    }
+    tags.update(scenario_tags or {})
+    height, width = data.dem.shape
+    block = _row_block(width)
     with (
         rasterio.open(ponding_depth_path, "w", **depth_profile) as depth_dest,
         rasterio.open(basin_id_path, "w", **label_profile) as basin_dest,
     ):
-        scenario_tags = {
-            "model": "static_dem_d8_depression_storage_spill_screening",
-            "effective_rainfall_m": f"{effective_rain_m:.9g}",
-            "minimum_depression_depth_m": f"{minimum_depression_depth_m:.9g}",
-            "minimum_basin_area_m2": f"{minimum_basin_area_m2:.9g}",
-            "depth_units": "m",
-            "limitations": (
-                "Static D8 screening using connected fill-zone components, not "
-                "a nested depression hierarchy; no storm timing, spatial "
-                "infiltration, culverts, sewers, or hydraulic routing."
-            ),
-        }
-        depth_dest.update_tags(**scenario_tags)
-        basin_dest.update_tags(**scenario_tags)
-        row_step = 512
-        for row in range(0, dem.shape[0], row_step):
-            stop = min(row + row_step, dem.shape[0])
+        depth_dest.update_tags(**tags)
+        basin_dest.update_tags(**tags)
+        for row in range(0, height, block):
+            stop = min(row + block, height)
             depth_block = depths[row:stop].copy()
-            depth_block[~valid_dem[row:stop]] = depth_profile["nodata"]
-            window = rasterio.windows.Window(0, row, dem.shape[1], stop - row)
+            depth_block[~valid_dem[row:stop]] = depth_nodata
+            window = Window(0, row, width, stop - row)
             depth_dest.write(depth_block, 1, window=window)
             basin_dest.write(labels[row:stop], 1, window=window)
 
-    basin_summary_path.parent.mkdir(parents=True, exist_ok=True)
-    if summaries:
-        with basin_summary_path.open("w", newline="", encoding="utf-8") as summary_file:
-            writer = csv.DictWriter(summary_file, fieldnames=list(summaries[0]))
-            writer.writeheader()
-            writer.writerows(summaries)
-    else:
-        basin_summary_path.write_text("basin_id,status\n", encoding="utf-8")
+    _write_csv(basin_summary_path, STORM_FIELDS, summaries)
     return summaries
 
 
+# --------------------------------------------------------------------------
+# Workflow
+# --------------------------------------------------------------------------
 def run_terrain_analysis(config: AnalysisConfig) -> None:
     """Build and analyze a buffered elevation mosaic for one configured area."""
     center_x, center_y = projected_center(config.center_lon, config.center_lat)
@@ -836,31 +1114,64 @@ def run_terrain_analysis(config: AnalysisConfig) -> None:
     output_dir = config.output_dir
     prefix = config.output_prefix
     output_dir.mkdir(parents=True, exist_ok=True)
+    storm = config.rainfall_mm is not None
+    prepare_basins = storm or config.prepare_basins_only
+    in_cells = bool(getattr(config, "contributing_area_in_cells", False))
+
     buffered_dem = output_dir / f"{prefix}_buffered_dem.tif"
     buffered_depth = output_dir / f"{prefix}_buffered_depression_depth.tif"
     result_depth = output_dir / f"{prefix}_depression_depth.tif"
-    prepare_basins = config.rainfall_mm is not None or config.prepare_basins_only
-    contributing_area = output_dir / f"{prefix}_buffered_contributing_area.tif" if prepare_basins else None
-    upslope_storage = output_dir / f"{prefix}_buffered_upslope_storage.tif" if prepare_basins else None
-    d8_pointer = output_dir / f"{prefix}_buffered_d8_pointer.tif" if prepare_basins else None
-    d8_contributing_area = output_dir / f"{prefix}_buffered_d8_contributing_area.tif" if prepare_basins else None
-    basin_ids = output_dir / f"{prefix}_buffered_depression_basin_id.tif" if prepare_basins else None
-    basin_summary = output_dir / f"{prefix}_buffered_basin_summary.csv" if prepare_basins else None
+    contributing_area = output_dir / f"{prefix}_buffered_contributing_area.tif"
+    upslope_storage = output_dir / f"{prefix}_buffered_upslope_storage.tif"
+    d8_pointer = output_dir / f"{prefix}_buffered_d8_pointer.tif"
+    d8_contributing_area = output_dir / f"{prefix}_buffered_d8_contributing_area.tif"
+    basin_ids = output_dir / f"{prefix}_buffered_depression_basin_id.tif"
+    basin_summary = output_dir / f"{prefix}_buffered_basin_summary.csv"
+    # When both a network-only run and a storm run are requested, keep their
+    # outputs apart so the storm results do not overwrite the network files.
+    if config.prepare_basins_only and storm:
+        network_ids = output_dir / f"{prefix}_buffered_basin_network_id.tif"
+        network_summary = output_dir / f"{prefix}_buffered_basin_network_summary.csv"
+        print("Both network preparation and a storm scenario requested; network "
+              f"outputs use separate files ({network_summary.name}).")
+    else:
+        network_ids, network_summary = basin_ids, basin_summary
 
-    effective_rain = None
-    if config.rainfall_mm is not None:
+    effective_rain = 0.0
+    scenario_tags: dict[str, str] = {}
+    if storm:
         result_contributing_area = output_dir / f"{prefix}_contributing_area.tif"
         result_upslope_storage = output_dir / f"{prefix}_upslope_depression_storage.tif"
         buffered_ponding = output_dir / f"{prefix}_buffered_estimated_ponding_depth.tif"
         result_ponding = output_dir / f"{prefix}_estimated_ponding_depth.tif"
         result_basin_ids = output_dir / f"{prefix}_depression_basin_id.tif"
-        fraction = 0.5 if config.infiltration_fraction is None else config.infiltration_fraction
+        fraction = (
+            DEFAULT_INFILTRATION_FRACTION
+            if config.infiltration_fraction is None
+            else config.infiltration_fraction
+        )
         effective_rain = effective_rainfall_m(
             config.rainfall_mm,
             infiltration_fraction=fraction,
             infiltration_capacity_mm_h=config.infiltration_capacity_mm_h,
             rainfall_duration_hours=config.rainfall_duration_hours,
         )
+        scenario_tags = {
+            "rainfall_mm": f"{config.rainfall_mm:.9g}",
+            "infiltration_fraction": (
+                "n/a" if config.infiltration_capacity_mm_h is not None else f"{fraction:.9g}"
+            ),
+            "infiltration_capacity_mm_h": (
+                "n/a"
+                if config.infiltration_capacity_mm_h is None
+                else f"{config.infiltration_capacity_mm_h:.9g}"
+            ),
+            "rainfall_duration_hours": (
+                "n/a"
+                if config.infiltration_capacity_mm_h is None
+                else f"{config.rainfall_duration_hours:.9g}"
+            ),
+        }
         if config.infiltration_capacity_mm_h is None:
             print(
                 f"Storm rainfall: {config.rainfall_mm:g} mm; assuming "
@@ -883,35 +1194,30 @@ def run_terrain_analysis(config: AnalysisConfig) -> None:
     run_depression_analysis(
         buffered_dem,
         buffered_depth,
-        contributing_area_path=contributing_area,
-        upslope_storage_path=upslope_storage,
-        d8_pointer_path=d8_pointer,
-        d8_contributing_area_path=d8_contributing_area,
+        contributing_area_path=contributing_area if prepare_basins else None,
+        upslope_storage_path=upslope_storage if prepare_basins else None,
+        d8_pointer_path=d8_pointer if prepare_basins else None,
+        d8_contributing_area_path=d8_contributing_area if prepare_basins else None,
     )
     if config.prepare_basins_only:
-        assert d8_pointer is not None and d8_contributing_area is not None
-        assert basin_ids is not None and basin_summary is not None
         summaries = write_basin_network_outputs(
             buffered_dem,
             buffered_depth,
             d8_pointer,
             d8_contributing_area,
-            basin_ids,
-            basin_summary,
+            network_ids,
+            network_summary,
             minimum_depression_depth_m=config.minimum_depression_depth_m,
             minimum_basin_area_m2=config.minimum_basin_area_m2,
+            contributing_area_in_cells=in_cells,
         )
         print(f"Prepared {len(summaries):,} DEM-derived basins.")
-        print(f"Basin IDs: {basin_ids}")
-        print(f"Basin network summary: {basin_summary}")
+        print(f"Basin IDs: {network_ids}")
+        print(f"Basin network summary: {network_summary}")
     print("Clipping to the requested result rectangle ...")
     clip_to_area(buffered_depth, result_depth, result_bounds)
 
-    if config.rainfall_mm is not None:
-        assert contributing_area is not None and upslope_storage is not None
-        assert d8_pointer is not None and d8_contributing_area is not None
-        assert buffered_ponding is not None and basin_ids is not None
-        assert basin_summary is not None
+    if storm:
         clip_to_area(contributing_area, result_contributing_area, result_bounds)
         clip_to_area(upslope_storage, result_upslope_storage, result_bounds)
         basin_summaries = write_basin_storage_spill_outputs(
@@ -925,10 +1231,17 @@ def run_terrain_analysis(config: AnalysisConfig) -> None:
             effective_rain,
             minimum_depression_depth_m=config.minimum_depression_depth_m,
             minimum_basin_area_m2=config.minimum_basin_area_m2,
+            contributing_area_in_cells=in_cells,
+            scenario_tags=scenario_tags,
         )
         clip_to_area(buffered_ponding, result_ponding, result_bounds)
         clip_to_area(basin_ids, result_basin_ids, result_bounds)
-        total_spill = sum(float(row["spill_volume_m3"]) for row in basin_summaries)
+        retained = sum(float(r["retained_volume_m3"]) for r in basin_summaries)
+        exported = sum(
+            float(r["spill_volume_m3"])
+            for r in basin_summaries
+            if int(r["downstream_basin_id"]) == 0
+        )
         print(f"Contributing area raster (m²): {result_contributing_area}")
         print(f"Average upslope depression storage raster (m): {result_upslope_storage}")
         print(f"Basin-based estimated ponding-depth raster (m): {result_ponding}")
@@ -936,8 +1249,8 @@ def run_terrain_analysis(config: AnalysisConfig) -> None:
         print(f"Basin storage/spill summary: {basin_summary}")
         print(
             f"Processed {len(basin_summaries):,} depression components; "
-            f"sum of basin spill transfers {total_spill:,.1f} m³ "
-            "(a routed volume may spill at multiple basins)."
+            f"retained {retained:,.1f} m³ in depressions, "
+            f"{exported:,.1f} m³ left the analysis (edge, NoData or unresolved paths)."
         )
 
     print(f"Finished. Rectangular depression-depth raster: {result_depth}")

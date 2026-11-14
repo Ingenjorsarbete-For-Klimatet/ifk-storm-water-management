@@ -145,12 +145,15 @@ def run_depression_analysis(
     environment.verbose = False
     environment.working_directory = str(dem_path.parent)
     dem = environment.read_raster(dem_path.name)
-    filled_dem = environment.fill_depressions_wang_and_liu(
-        dem, flat_increment=WANG_LIU_FLAT_INCREMENT_M
-    )
-    depth = environment.raster_calculator("('dem_no_deps'-'dem')", [filled_dem, dem])
+    # Exact depression depth is used for ponding and runoff calculations, but not for flow accumulation.
+    exact_fill = environment.fill_depressions_wang_and_liu(dem, fix_flats=False)
+    depth = environment.raster_calculator("('dem_no_deps'-'dem')", [exact_fill, dem])
     environment.write_raster(depth, output_path.name)
     if all(path is not None for path in requested_outputs):
+        # Filling with flat increment only for D8-flow.
+        filled_dem = environment.fill_depressions_wang_and_liu(
+            dem, flat_increment=WANG_LIU_FLAT_INCREMENT_M
+        )
         contributing_area = environment.fd8_flow_accum(
             filled_dem, out_type="catchment area", log_transform=False, clip=False
         )

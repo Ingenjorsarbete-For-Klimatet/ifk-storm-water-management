@@ -121,9 +121,9 @@ class PySwmmConfig:
 
     effective_rainfall_mm: float = 100.0
     duration_hours: float = 1.0
-    drain_hours: float = 2.0
+    drain_hours: float = 1.0
     report_interval_minutes: int = 5
-    minimum_storage_basin_area_m2: float = 100.0
+    minimum_storage_basin_area_m2: float = 50.0
     spill_channel_width_m: float = 1.0
     spill_channel_roughness: float = 0.03
     overwrite: bool = False

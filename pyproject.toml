@@ -18,10 +18,13 @@ dependencies = [
     "pyproj==3.7.1",
     "matplotlib==3.10.3",
     "geopandas==1.1.1",
+    "pyogrio==0.13.0",
+    "fiona==1.10.1",
     "whitebox==2.3.6",
     "shapely==2.1.1",
     "rasterio==1.4.3",
     "scipy",
+    "pyswmm>=2.2,<3",
 ]
 
 [project.optional-dependencies]
@@ -35,7 +38,6 @@ doc = [
     "mkdocs-material ~= 8.5",
     "mkdocstrings[python] ~= 0.19",
 ]
-swmm = ["pyswmm>=2.2,<3"]
 dev = [
     "ifk-storm-water-management[lint]",
     "ifk-storm-water-management[type]",
