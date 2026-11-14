@@ -1,0 +1,8 @@
+default_agent = "auto-approve"
+active_model = "zai-glm-5-3"
+
+[[models]]
+name = "zai-glm-5-3"
+provider = "mistral"
+alias = "zai-glm-5-3"
+thinking = "off"
