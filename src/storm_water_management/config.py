@@ -33,13 +33,17 @@ class DownloadConfig:
                     "Supply either bbox or both center longitude and latitude."
                 )
             if not math.isfinite(self.center_lon) or not -180 <= self.center_lon <= 180:
-                raise ValueError("Center longitude must be between -180 and 180 degrees.")
+                raise ValueError(
+                    "Center longitude must be between -180 and 180 degrees."
+                )
             if not math.isfinite(self.center_lat) or not -90 <= self.center_lat <= 90:
                 raise ValueError("Center latitude must be between -90 and 90 degrees.")
         else:
             min_lon, min_lat, max_lon, max_lat = self.bbox
             if not -180 <= min_lon < max_lon <= 180:
-                raise ValueError("Longitude bounds must satisfy -180 <= min < max <= 180.")
+                raise ValueError(
+                    "Longitude bounds must satisfy -180 <= min < max <= 180."
+                )
             if not -90 <= min_lat < max_lat <= 90:
                 raise ValueError("Latitude bounds must satisfy -90 <= min < max <= 90.")
         if self.output_dir is not None and not isinstance(self.output_dir, Path):
@@ -74,7 +78,10 @@ class AnalysisConfig:
 
     def __post_init__(self) -> None:
         """Validate settings independent of any specific location."""
-        if not self.output_prefix or Path(self.output_prefix).name != self.output_prefix:
+        if (
+            not self.output_prefix
+            or Path(self.output_prefix).name != self.output_prefix
+        ):
             raise ValueError("Output prefix must be a non-empty filename component.")
         if self.rainfall_mm is not None and (
             not math.isfinite(self.rainfall_mm) or self.rainfall_mm <= 0
@@ -91,7 +98,10 @@ class AnalysisConfig:
             )
         ):
             raise ValueError("Infiltration and duration options require rainfall.")
-        if self.infiltration_fraction is not None and not 0 <= self.infiltration_fraction <= 1:
+        if (
+            self.infiltration_fraction is not None
+            and not 0 <= self.infiltration_fraction <= 1
+        ):
             raise ValueError("Infiltration fraction must be between zero and one.")
         if self.minimum_depression_depth_m < 0 or self.minimum_basin_area_m2 < 0:
             raise ValueError("Basin depth and area thresholds cannot be negative.")
@@ -103,14 +113,23 @@ class AnalysisConfig:
             extent = getattr(self, f"{direction}_km")
             buffer = getattr(self, f"buffer_{direction}_km")
             if not math.isfinite(extent) or extent <= 0:
-                raise ValueError(f"{direction.title()} extent must be finite and positive.")
+                raise ValueError(
+                    f"{direction.title()} extent must be finite and positive."
+                )
             if not math.isfinite(buffer) or buffer < 0:
-                raise ValueError(f"{direction.title()} buffer must be finite and non-negative.")
+                raise ValueError(
+                    f"{direction.title()} buffer must be finite and non-negative."
+                )
         if self.infiltration_capacity_mm_h is not None:
             if self.infiltration_capacity_mm_h < 0:
                 raise ValueError("Infiltration capacity cannot be negative.")
-            if self.rainfall_duration_hours is None or self.rainfall_duration_hours <= 0:
-                raise ValueError("Infiltration capacity requires a positive storm duration.")
+            if (
+                self.rainfall_duration_hours is None
+                or self.rainfall_duration_hours <= 0
+            ):
+                raise ValueError(
+                    "Infiltration capacity requires a positive storm duration."
+                )
         elif self.rainfall_duration_hours is not None:
             raise ValueError("Storm duration requires an infiltration capacity.")
 

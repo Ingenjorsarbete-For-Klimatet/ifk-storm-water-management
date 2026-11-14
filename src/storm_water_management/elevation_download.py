@@ -37,7 +37,9 @@ def bbox_for_radius(
     lat_delta = radius_km / 111.32
     longitude_scale = 111.32 * math.cos(math.radians(latitude))
     if abs(longitude_scale) < 1e-8:
-        raise ValueError("A radius-based search is not supported at the poles; use a bounding box.")
+        raise ValueError(
+            "A radius-based search is not supported at the poles; use a bounding box."
+        )
     lon_delta = radius_km / longitude_scale
     return (
         longitude - lon_delta,
@@ -53,7 +55,9 @@ def location_slug(name: str) -> str:
     ascii_name = normalized.encode("ascii", "ignore").decode("ascii").lower()
     slug = re.sub(r"[^a-z0-9]+", "-", ascii_name).strip("-")
     if not slug:
-        raise ValueError("The location name must contain at least one letter or number.")
+        raise ValueError(
+            "The location name must contain at least one letter or number."
+        )
     return slug
 
 
@@ -91,7 +95,9 @@ def find_tiles(bbox: tuple[float, float, float, float], collection: str) -> list
     while page_url:
         page = get_json(page_url)
         for item in page.get("features", []):
-            item_id = item.get("id") or item.get("assets", {}).get("data", {}).get("href", "")
+            item_id = item.get("id") or item.get("assets", {}).get("data", {}).get(
+                "href", ""
+            )
             items_by_id[item_id] = item
         next_link = next(
             (link for link in page.get("links", []) if link.get("rel") == "next"),
@@ -183,7 +189,9 @@ def download_elevation_tiles(
     location_slug(name)
     if bbox is None:
         if center_lon is None or center_lat is None:
-            raise ValueError("Supply either bbox or both center longitude and latitude.")
+            raise ValueError(
+                "Supply either bbox or both center longitude and latitude."
+            )
         selected_bbox = bbox_for_radius(radius_km, center_lon, center_lat)
     else:
         selected_bbox = bbox
@@ -192,7 +200,9 @@ def download_elevation_tiles(
     authorization = auth_header or make_auth_header()
     destination_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Searching for {name} in collection {collection} within bbox {selected_bbox} ...")
+    print(
+        f"Searching for {name} in collection {collection} within bbox {selected_bbox} ..."
+    )
     items = find_tiles(selected_bbox, collection)
     if not items:
         print("No elevation tiles found for this area.")

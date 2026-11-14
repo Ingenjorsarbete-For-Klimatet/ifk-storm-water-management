@@ -19,7 +19,11 @@ def test_create_terrain_plot_ignores_misaligned_optional_scenario(tmp_path):
     scenario = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
 
     transform = from_origin(0, 2, 1, 1)
-    for path, data in ((depth_path, depth), (elevation_path, elevation), (scenario_path, scenario)):
+    for path, data in (
+        (depth_path, depth),
+        (elevation_path, elevation),
+        (scenario_path, scenario),
+    ):
         with rasterio.open(
             path,
             "w",

@@ -12,6 +12,13 @@ Behaviour notes (changes relative to the first version):
 * D8 contributing area may be given in m^2 (default) or in cells.
 * Network preparation and the storm simulation share one network builder, so
   capacity, spill level and status are identical in both modes.
+* When several boundary crossings tie at the lowest saddle (a puddle inside a
+  flat channel), the outlet is the tied crossing that carries the most D8
+  flow, not the first one in raster order.
+* A downstream link is kept when the receiver's outlet area is larger within a
+  small relative tolerance (the accumulation raster is float32, so outlets of
+  large basins can tie or swap by a few ulps); remaining links are dropped and
+  any parent cycle is broken explicitly, so the spill graph stays acyclic.
 """
 
 from __future__ import annotations
@@ -55,9 +62,15 @@ D8_CODES = {offset: code for code, offset in D8_OFFSETS.items()}
 # Fill depth above which a cell belongs to a depression component. This must
 # exceed any epsilon gradient added by the DEM conditioning (fix-flats) step.
 LABEL_EPSILON_M = 1e-4
+# Bumped when behaviour changes; diagnose_basin_network.py refuses older copies.
+MODULE_VERSION = 4
 # Outlet selection prefers the crossing the D8 pointer follows if its saddle is
 # within this distance of the lowest saddle (covers fix-flats epsilon gradients).
 OUTLET_FOLLOW_TOLERANCE_M = 5e-3
+# Relative tolerance when a downstream receiver must have more outlet
+# contributing area than its sender; covers float32 quantisation of the
+# accumulation raster (adjacent outlets of large basins can tie or swap ulps).
+OUTLET_AREA_TOLERANCE = 1e-6
 # Used when the configuration does not give an infiltration fraction.
 # TODO: move into AnalysisConfig.
 DEFAULT_INFILTRATION_FRACTION = 0.5
@@ -191,7 +204,9 @@ def label_depression_components(
     compatibility.
     """
     if minimum_depth_m < 0 or minimum_area_m2 < 0 or label_epsilon_m < 0:
-        raise ValueError("Basin depth, area and epsilon thresholds must be non-negative.")
+        raise ValueError(
+            "Basin depth, area and epsilon thresholds must be non-negative."
+        )
     depression_mask = valid & (depression_depth > label_epsilon_m)
     labels, component_count = ndimage.label(
         depression_mask, structure=np.ones((3, 3), dtype=np.uint8)
@@ -245,14 +260,19 @@ def _find_spill_outlets(
     real exit, which therefore has the largest accumulation, whereas side
     crossings that merely tie on saddle elevation (plateau rims) carry little.
     Without ``accumulation`` the lowest-saddle crossing is used. If no crossing is
-    followed by the pointer, the lowest-saddle pair is used. Remaining ties go to
+    followed by the pointer, the tied lowest-saddle crossing with the largest
+    ``accumulation`` is used: on a flat (for example a puddle inside a flat
+    channel) the real spill is the crossing that carries the main flow, not an
+    arbitrary one in raster order. Remaining ties go to
     the lowest linear-index pair, so the result is deterministic.
     """
     basin_count = counts.size - 1
     height, width = labels.shape
     total_cells = height * width
     if total_cells * total_cells >= np.iinfo(np.int64).max:
-        raise ValueError("Raster too large for the int64 outlet-pair key (about 3e9 cells).")
+        raise ValueError(
+            "Raster too large for the int64 outlet-pair key (about 3e9 cells)."
+        )
 
     touches_invalid = np.zeros(basin_count + 1, dtype=bool)
     # Raster-edge and NoData-adjacent components are open/censored; their true
@@ -321,8 +341,13 @@ def _find_spill_outlets(
         best_follow = np.full(basin_count + 1, int_max, dtype=np.int64)
         np.minimum.at(best_follow, ids[chosen_follow], keys[chosen_follow])
         at_lowest = saddle <= spill_levels[ids] + tie_atol
+        # Among equally low saddles, the crossing carrying the most flow is the
+        # real spill; the remaining tie goes to the lowest key.
+        best_any_area = np.full(basin_count + 1, -np.inf, dtype=np.float64)
+        np.maximum.at(best_any_area, ids[at_lowest], areas[at_lowest])
+        chosen_any = at_lowest & (areas >= best_any_area[ids])
         best_any = np.full(basin_count + 1, int_max, dtype=np.int64)
-        np.minimum.at(best_any, ids[at_lowest], keys[at_lowest])
+        np.minimum.at(best_any, ids[chosen_any], keys[chosen_any])
         selected_pair = np.where(best_follow != int_max, best_follow, best_any)
         has_outlet = selected_pair != int_max
         outlet_inside[has_outlet] = selected_pair[has_outlet] // total_cells
@@ -391,6 +416,74 @@ def _downstream_basin(
         start, source_basin, labels, pointer, valid, max_steps
     )
     return basin, reason
+
+
+def _break_parent_cycles(
+    parent: np.ndarray,
+    outlet_area: np.ndarray,
+    dropped: np.ndarray,
+    dropped_receiver: np.ndarray,
+) -> int:
+    """Drop one link per parent cycle so the spill graph stays acyclic.
+
+    Area-monotone links cannot cycle, but links kept within the outlet-area
+    tolerance could in principle. Each basin has at most one parent, so cycles
+    are found by following parent pointers with path colouring. In each cycle
+    the link of the member with the smallest outlet area (then smallest id) is
+    dropped, so its overflow leaves the system. Returns the number of cycles
+    broken.
+    """
+    broken = 0
+    color = np.zeros(parent.size, dtype=np.uint8)  # 0 unvisited, 1 on path, 2 done
+    for start in range(1, parent.size):
+        if color[start]:
+            continue
+        path: list[int] = []
+        node = start
+        while node > 0 and color[node] == 0:
+            color[node] = 1
+            path.append(node)
+            node = int(parent[node])
+        if node > 0 and color[node] == 1:
+            cycle = path[path.index(node) :]
+            weakest = min(cycle, key=lambda b: (outlet_area[b], b))
+            dropped_receiver[weakest] = parent[weakest]
+            dropped[weakest] = True
+            parent[weakest] = 0
+            broken += 1
+        for member in path:
+            color[member] = 2
+    return broken
+
+
+def _topological_order(parent: np.ndarray) -> np.ndarray:
+    """Order basin ids so every basin precedes its downstream receiver.
+
+    Kahn's algorithm on the spill graph. Outlet area alone is not a reliable
+    order once ties are kept within ``OUTLET_AREA_TOLERANCE``.
+    """
+    n = parent.size - 1
+    if n == 0:
+        return np.zeros(0, dtype=np.int64)
+    incoming = np.zeros(n + 1, dtype=np.int32)
+    senders = np.flatnonzero(parent > 0)
+    np.add.at(incoming, parent[senders], 1)
+    ready = [b for b in range(1, n + 1) if incoming[b] == 0]
+    order = np.empty(n, dtype=np.int64)
+    written = 0
+    while ready:
+        basin = ready.pop()
+        order[written] = basin
+        written += 1
+        receiver = int(parent[basin])
+        if receiver > 0:
+            incoming[receiver] -= 1
+            if incoming[receiver] == 0:
+                ready.append(receiver)
+    if written != n:  # defensive: cycles are broken when the network is built
+        remaining = np.setdiff1d(np.arange(1, n + 1), order[:written])
+        order[written:] = np.sort(remaining)
+    return order
 
 
 def _water_level_for_volume(
@@ -511,7 +604,9 @@ def _build_network(
     """Label basins, find spill outlets and topology, and compute capacities."""
     _validate_inputs(dem, depression_depth, d8_pointer, contributing_area, cell_area_m2)
     height, width = dem.shape
-    valid = _valid_mask(dem, depression_depth, d8_pointer, contributing_area, dem_nodata)
+    valid = _valid_mask(
+        dem, depression_depth, d8_pointer, contributing_area, dem_nodata
+    )
     _warn_if_accumulation_in_cells(
         contributing_area, valid, cell_area_m2, contributing_area_in_cells
     )
@@ -530,12 +625,24 @@ def _build_network(
     empty = np.zeros(n + 1)
     if n == 0:
         return _BasinNetwork(
-            labels, counts, np.full(1, np.inf), np.full(1, -1, dtype=np.int64),
-            np.zeros(1, dtype=bool), [""], np.full(1, -1, dtype=np.int64),
-            np.zeros(1, dtype=np.int32), np.zeros(1, dtype=np.int32),
-            np.zeros(1, dtype=bool), np.zeros(1, dtype=np.int32),
-            empty, empty, empty, empty, empty,
-            cell_area_m2, width,
+            labels,
+            counts,
+            np.full(1, np.inf),
+            np.full(1, -1, dtype=np.int64),
+            np.zeros(1, dtype=bool),
+            [""],
+            np.full(1, -1, dtype=np.int64),
+            np.zeros(1, dtype=np.int32),
+            np.zeros(1, dtype=np.int32),
+            np.zeros(1, dtype=bool),
+            np.zeros(1, dtype=np.int32),
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            cell_area_m2,
+            width,
         )
 
     surface = dem + depression_depth
@@ -569,17 +676,23 @@ def _build_network(
             reasons[basin_id],
             trace_end[basin_id],
             trace_steps[basin_id],
-        ) = _trace_downstream(
-            outside, basin_id, labels, d8_pointer, valid, max_steps
-        )
+        ) = _trace_downstream(outside, basin_id, labels, d8_pointer, valid, max_steps)
 
-    # A downstream node must have strictly more D8 contributing area; this also
-    # guarantees an acyclic graph. Links that violate it are dropped and counted.
+    # A downstream node must have more D8 contributing area at its outlet. The
+    # comparison tolerates float32 quantisation of the accumulation raster
+    # (outlets of large basins can tie or swap by a few ulps). Links that
+    # violate it beyond that indicate disagreeing fill surfaces and are
+    # dropped and counted; any cycle left among the kept ties is broken too.
     has_parent = parent > 0
     dropped = np.zeros(n + 1, dtype=bool)
-    dropped[has_parent] = outlet_area[parent[has_parent]] <= outlet_area[has_parent]
+    senders = np.flatnonzero(has_parent)
+    if senders.size:
+        sender_area = outlet_area[senders]
+        tolerance = OUTLET_AREA_TOLERANCE * np.maximum(sender_area, 1.0)
+        dropped[senders] = outlet_area[parent[senders]] < sender_area - tolerance
     dropped_receiver = np.where(dropped, parent, 0).astype(np.int32)
     parent[dropped] = 0
+    _break_parent_cycles(parent, outlet_area, dropped, dropped_receiver)
     has_parent = parent > 0
     child_area = np.bincount(
         parent[has_parent], weights=outlet_area[has_parent], minlength=n + 1
@@ -589,7 +702,8 @@ def _build_network(
     if dropped.any():
         warnings.warn(
             f"{int(dropped.sum())} downstream basin link(s) were dropped because the "
-            "receiver has no larger contributing area; their overflow leaves the "
+            "receiver has no larger contributing area or the link would close a "
+            "cycle; their overflow leaves the "
             "system (status 'spill_link_dropped').",
             RuntimeWarning,
             stacklevel=3,
@@ -630,9 +744,7 @@ def _build_network(
     min_elevation[~np.isfinite(min_elevation)] = np.nan
 
     max_depth = np.zeros(n + 1, dtype=np.float64)
-    max_depth[1:] = ndimage.maximum(
-        depression_depth, labels, index=np.arange(1, n + 1)
-    )
+    max_depth[1:] = ndimage.maximum(depression_depth, labels, index=np.arange(1, n + 1))
 
     return _BasinNetwork(
         labels=labels,
@@ -672,9 +784,7 @@ def _status(net: _BasinNetwork, basin_id: int) -> str:
 
 def _network_record(net: _BasinNetwork, basin_id: int) -> BasinRecord:
     inside = int(net.inside_outlet[basin_id])
-    outlet_row, outlet_col = (
-        divmod(inside, net.width) if inside >= 0 else (-1, -1)
-    )
+    outlet_row, outlet_col = divmod(inside, net.width) if inside >= 0 else (-1, -1)
     spill = float(net.spill[basin_id])
     if net.censored[basin_id]:
         spill = math.nan
@@ -785,10 +895,9 @@ def simulate_basin_storage_spill(
     retained = np.zeros(n + 1, dtype=np.float64)
     spill_volume = np.zeros(n + 1, dtype=np.float64)
     closed = net.closed
-    # Strictly increasing outlet area downstream gives a topological order.
-    for basin_id in np.argsort(net.outlet_area, kind="stable"):
-        if basin_id == 0:
-            continue
+    # A topological order of the spill graph: every basin is processed after
+    # all its upstream senders, also when outlet areas tie within tolerance.
+    for basin_id in _topological_order(net.parent):
         if not closed[basin_id]:
             spill_volume[basin_id] = incoming[basin_id]
             continue
@@ -918,7 +1027,9 @@ def _add_outlet_coordinates(
     for summary in summaries:
         row, col = int(summary["outlet_row"]), int(summary["outlet_col"])
         if row >= 0 and col >= 0:
-            outlet_x, outlet_y = rasterio.transform.xy(transform, row, col, offset="center")
+            outlet_x, outlet_y = rasterio.transform.xy(
+                transform, row, col, offset="center"
+            )
         else:
             outlet_x, outlet_y = math.nan, math.nan
         summary["outlet_x"] = float(outlet_x)
@@ -936,7 +1047,9 @@ def _write_csv(path: Path, fields: list[str], rows: list[BasinRecord]) -> None:
 
 def _tiled_profile(profile: dict, dtype: str, nodata: float | int) -> dict:
     out = profile.copy()
-    out.update(driver="GTiff", count=1, dtype=dtype, nodata=nodata, compress="lzw", tiled=True)
+    out.update(
+        driver="GTiff", count=1, dtype=dtype, nodata=nodata, compress="lzw", tiled=True
+    )
     out.pop("blockxsize", None)
     out.pop("blockysize", None)
     return out
@@ -1130,8 +1243,10 @@ def run_terrain_analysis(config: AnalysisConfig) -> None:
     if config.prepare_basins_only and storm:
         network_ids = output_dir / f"{prefix}_buffered_basin_network_id.tif"
         network_summary = output_dir / f"{prefix}_buffered_basin_network_summary.csv"
-        print("Both network preparation and a storm scenario requested; network "
-              f"outputs use separate files ({network_summary.name}).")
+        print(
+            "Both network preparation and a storm scenario requested; network "
+            f"outputs use separate files ({network_summary.name})."
+        )
     else:
         network_ids, network_summary = basin_ids, basin_summary
 
@@ -1157,7 +1272,9 @@ def run_terrain_analysis(config: AnalysisConfig) -> None:
         scenario_tags = {
             "rainfall_mm": f"{config.rainfall_mm:.9g}",
             "infiltration_fraction": (
-                "n/a" if config.infiltration_capacity_mm_h is not None else f"{fraction:.9g}"
+                "n/a"
+                if config.infiltration_capacity_mm_h is not None
+                else f"{fraction:.9g}"
             ),
             "infiltration_capacity_mm_h": (
                 "n/a"
@@ -1241,7 +1358,9 @@ def run_terrain_analysis(config: AnalysisConfig) -> None:
             if int(r["downstream_basin_id"]) == 0
         )
         print(f"Contributing area raster (m²): {result_contributing_area}")
-        print(f"Average upslope depression storage raster (m): {result_upslope_storage}")
+        print(
+            f"Average upslope depression storage raster (m): {result_upslope_storage}"
+        )
         print(f"Basin-based estimated ponding-depth raster (m): {result_ponding}")
         print(f"Depression basin ID raster: {result_basin_ids}")
         print(f"Basin storage/spill summary: {basin_summary}")

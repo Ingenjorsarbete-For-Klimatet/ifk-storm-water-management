@@ -106,7 +106,8 @@ def test_spill_from_first_basin_is_routed_to_downstream_basin():
     dem[2, 8] = 0.4
     depression = np.zeros_like(dem)
     depression[2, 2] = 1.0
-    depression[2, 7] = 1.0
+    # Fill-consistent depth: the pit at 0.0 m fills to its 0.4 m rim.
+    depression[2, 7] = 0.4
     pointer = np.zeros_like(dem)
     pointer[2, 2] = 2
     pointer[2, 3:7] = 2

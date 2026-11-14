@@ -51,18 +51,29 @@ def _quantiles(values: np.ndarray) -> str:
     if values.size == 0:
         return "n/a"
     q = np.quantile(values, [0.05, 0.25, 0.5, 0.75, 0.95])
-    return "  ".join(f"p{p}={v:.3g}" for p, v in zip((5, 25, 50, 75, 95), q))
+    return "  ".join(
+        f"p{p}={v:.3g}" for p, v in zip((5, 25, 50, 75, 95), q, strict=True)
+    )
 
 
 def main() -> None:
+    """Rebuild the basin network from result rasters and report problem basins."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--results-dir", type=Path, required=True)
     parser.add_argument("--prefix", required=True)
     parser.add_argument("--module", default="storm_water_management.storm_scenario")
-    parser.add_argument("--min-depth", type=float, default=None,
-                        help="default: AnalysisConfig.minimum_depression_depth_m")
-    parser.add_argument("--min-area", type=float, default=None,
-                        help="default: AnalysisConfig.minimum_basin_area_m2")
+    parser.add_argument(
+        "--min-depth",
+        type=float,
+        default=None,
+        help="default: AnalysisConfig.minimum_depression_depth_m",
+    )
+    parser.add_argument(
+        "--min-area",
+        type=float,
+        default=None,
+        help="default: AnalysisConfig.minimum_basin_area_m2",
+    )
     parser.add_argument("--samples", type=int, default=8)
     parser.add_argument("--output-csv", type=Path, default=None)
     args = parser.parse_args()
@@ -75,10 +86,16 @@ def main() -> None:
             f"over {mod.__file__} (or fix PYTHONPATH so the right file is imported)."
         )
     config_defaults = _config_defaults(args.module)
-    min_depth = args.min_depth if args.min_depth is not None else config_defaults.get(
-        "minimum_depression_depth_m", 0.02)
-    min_area = args.min_area if args.min_area is not None else config_defaults.get(
-        "minimum_basin_area_m2", 25.0)
+    min_depth = (
+        args.min_depth
+        if args.min_depth is not None
+        else config_defaults.get("minimum_depression_depth_m", 0.02)
+    )
+    min_area = (
+        args.min_area
+        if args.min_area is not None
+        else config_defaults.get("minimum_basin_area_m2", 25.0)
+    )
     print(f"Thresholds: minimum depth {min_depth:g} m, minimum area {min_area:g} m2")
     folder, prefix = args.results_dir, args.prefix
     data = mod._read_inputs(
@@ -109,9 +126,16 @@ def main() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         net = mod._build_network(
-            data.dem, data.depression, data.pointer, data.accumulation,
-            data.cell_area, min_depth, min_area,
-            mod.LABEL_EPSILON_M, False, None,
+            data.dem,
+            data.depression,
+            data.pointer,
+            data.accumulation,
+            data.cell_area,
+            min_depth,
+            min_area,
+            mod.LABEL_EPSILON_M,
+            False,
+            None,
         )
     n = net.basin_count
     print(f"\n== Basins: {n:,} ==")
@@ -123,12 +147,15 @@ def main() -> None:
     for key, value in reasons.most_common():
         print(f"  {key:32s} {value:8,d}")
     print("\nBasin size (cells):", _quantiles(net.counts[1:].astype(float)))
-    print("Outlet area / own area:", _quantiles(
-        net.outlet_area[1:] / np.maximum(net.counts[1:] * data.cell_area, 1e-9)))
+    print(
+        "Outlet area / own area:",
+        _quantiles(
+            net.outlet_area[1:] / np.maximum(net.counts[1:] * data.cell_area, 1e-9)
+        ),
+    )
 
     problems: list[dict] = []
     flat_dem = data.dem.reshape(-1)
-    flat_depth = data.depression.reshape(-1)
     flat_ptr = data.pointer.reshape(-1)
     flat_labels = net.labels.reshape(-1)
 
@@ -139,24 +166,46 @@ def main() -> None:
     if unresolved:
         ends = net.trace_end[unresolved]
         end_ptr = flat_ptr[ends]
-        print("pointer value at trace end:",
-              dict(Counter(int(v) if np.isfinite(v) else -1 for v in end_ptr)))
-        print("trace end inside a retained basin:",
-              f"{int((flat_labels[ends] > 0).sum()):,}")
-        print("steps before ending:", _quantiles(net.trace_steps[unresolved].astype(float)))
-        print("dem at trace end - spill level:",
-              _quantiles(flat_dem[ends] - net.spill[unresolved]))
+        print(
+            "pointer value at trace end:",
+            dict(Counter(int(v) if np.isfinite(v) else -1 for v in end_ptr)),
+        )
+        print(
+            "trace end inside a retained basin:",
+            f"{int((flat_labels[ends] > 0).sum()):,}",
+        )
+        print(
+            "steps before ending:",
+            _quantiles(net.trace_steps[unresolved].astype(float)),
+        )
+        print(
+            "dem at trace end - spill level:",
+            _quantiles(flat_dem[ends] - net.spill[unresolved]),
+        )
     for b in unresolved:
         ox, oy = _xy(data.transform, int(net.inside_outlet[b]), width)
         ex, ey = _xy(data.transform, int(net.trace_end[b]), width)
-        problems.append(dict(
-            basin_id=b, kind="unresolved", reason=net.trace_reason[b],
-            cell_count=int(net.counts[b]), outlet_x=ox, outlet_y=oy,
-            end_x=ex, end_y=ey, steps=int(net.trace_steps[b]),
-            sender_area_m2=float(net.outlet_area[b]), receiver_id=0,
-            receiver_area_m2=float("nan")))
+        problems.append(
+            dict(
+                basin_id=b,
+                kind="unresolved",
+                reason=net.trace_reason[b],
+                cell_count=int(net.counts[b]),
+                outlet_x=ox,
+                outlet_y=oy,
+                end_x=ex,
+                end_y=ey,
+                steps=int(net.trace_steps[b]),
+                sender_area_m2=float(net.outlet_area[b]),
+                receiver_id=0,
+                receiver_area_m2=float("nan"),
+            )
+        )
     for row in problems[: args.samples]:
-        print("  e.g.", {k: (round(v, 1) if isinstance(v, float) else v) for k, v in row.items()})
+        print(
+            "  e.g.",
+            {k: (round(v, 1) if isinstance(v, float) else v) for k, v in row.items()},
+        )
 
     dropped = np.flatnonzero(net.link_dropped)
     print(f"\n== Dropped links: {dropped.size:,} ==")
@@ -166,27 +215,53 @@ def main() -> None:
         receiver_area = net.outlet_area[receivers]
         ratio = receiver_area / np.maximum(sender_area, 1e-9)
         print("receiver area / sender area:", _quantiles(ratio))
-        print(f"  exactly equal (|diff| < 1e-6 m2): {int((np.abs(receiver_area - sender_area) < 1e-6).sum()):,}")
-        print(f"  receiver smaller than sender:     {int((receiver_area < sender_area - 1e-6).sum()):,}")
-        print(f"  receiver outlet area equals its own basin area: "
-              f"{int((receiver_area <= net.counts[receivers] * data.cell_area + 1e-6).sum()):,}")
+        print(
+            f"  exactly equal (|diff| < 1e-6 m2): {int((np.abs(receiver_area - sender_area) < 1e-6).sum()):,}"
+        )
+        print(
+            f"  receiver smaller than sender:     {int((receiver_area < sender_area - 1e-6).sum()):,}"
+        )
+        print(
+            f"  receiver outlet area equals its own basin area: "
+            f"{int((receiver_area <= net.counts[receivers] * data.cell_area + 1e-6).sum()):,}"
+        )
         print("sender area (m2):", _quantiles(sender_area))
         print("receiver area (m2):", _quantiles(receiver_area))
         reasons_dropped = Counter(net.trace_reason[b] for b in dropped)
         print("trace end reasons of dropped:", dict(reasons_dropped))
-        for b, r in zip(dropped, receivers):
+        for b, r in zip(dropped, receivers, strict=True):
             ox, oy = _xy(data.transform, int(net.inside_outlet[b]), width)
             rx, ry = _xy(data.transform, int(net.inside_outlet[r]), width)
-            problems.append(dict(
-                basin_id=int(b), kind="dropped", reason=net.trace_reason[b],
-                cell_count=int(net.counts[b]), outlet_x=ox, outlet_y=oy,
-                end_x=rx, end_y=ry, steps=int(net.trace_steps[b]),
-                sender_area_m2=float(net.outlet_area[b]), receiver_id=int(r),
-                receiver_area_m2=float(net.outlet_area[r])))
+            problems.append(
+                dict(
+                    basin_id=int(b),
+                    kind="dropped",
+                    reason=net.trace_reason[b],
+                    cell_count=int(net.counts[b]),
+                    outlet_x=ox,
+                    outlet_y=oy,
+                    end_x=rx,
+                    end_y=ry,
+                    steps=int(net.trace_steps[b]),
+                    sender_area_m2=float(net.outlet_area[b]),
+                    receiver_id=int(r),
+                    receiver_area_m2=float(net.outlet_area[r]),
+                )
+            )
         print("examples (largest sender area first):")
         for b in dropped[np.argsort(-net.outlet_area[dropped])][: args.samples]:
-            row = next(p for p in problems if p["basin_id"] == int(b) and p["kind"] == "dropped")
-            print("  ", {k: (round(v, 1) if isinstance(v, float) else v) for k, v in row.items()})
+            row = next(
+                p
+                for p in problems
+                if p["basin_id"] == int(b) and p["kind"] == "dropped"
+            )
+            print(
+                "  ",
+                {
+                    k: (round(v, 1) if isinstance(v, float) else v)
+                    for k, v in row.items()
+                },
+            )
 
     out = args.output_csv or folder / f"{prefix}_basin_network_problems.csv"
     if problems:
