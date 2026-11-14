@@ -1,11 +1,12 @@
 """Delta depression-depth tiles into a raster PMTiles archive.
 
 The block-wise SWEREF99 TM depth rasters are reprojected (nearest
-neighbour) into Web Mercator at a single zoom level, cut into 256 px
-tiles, encoded as lossless grayscale WebP or AVIF and written into one
-PMTiles archive. Tiles that carry no elevation data at all are
-omitted; PMTiles run-length/hashing de-duplicates the many all-zero
-tiles.
+neighbour) into Web Mercator at a single zoom level, cut into square
+raster tiles (256 px by default; PMTiles puts no limit on the tile
+raster dimensions), encoded as lossless grayscale WebP or AVIF and
+written into one PMTiles archive. Tiles that carry no elevation data
+at all are omitted; PMTiles run-length/hashing de-duplicates the many
+all-zero tiles.
 
 Consume in maplibregl with the pmtiles protocol adapter::
 
@@ -30,19 +31,22 @@ from pmtiles.writer import write
 from storm_water_management import depth_encode
 
 WEB_MERCATOR_WORLD = 20037508.342789244
+#: Tile raster edge in pixels of the default tile grid. PMTiles puts no
+#: limit on the tile raster dimensions; this is only the default.
 TILE_SIZE = 256
 
 
-def meters_per_pixel(zoom: int) -> float:
+def meters_per_pixel(zoom: int, tile_size: int = TILE_SIZE) -> float:
     """Web Mercator ground resolution at the equator for a zoom level.
 
     Args:
         zoom: zoom level.
+        tile_size: tile raster edge in pixels.
 
     Returns:
         Meters per pixel at the equator.
     """
-    return 2 * WEB_MERCATOR_WORLD / (TILE_SIZE * 2**zoom)
+    return 2 * WEB_MERCATOR_WORLD / (tile_size * 2**zoom)
 
 
 def tile_to_lonlat(z: int, x: int, y: int, corner: str) -> tuple[float, float]:
@@ -90,28 +94,29 @@ def _tile_ranges(bounds_3857, zoom: int) -> tuple[int, int, int, int]:
     return x_min, y_min, x_max, y_max
 
 
-def _alloc_window(bounds_3857, zoom: int):
+def _alloc_window(bounds_3857, zoom: int, tile_size: int = TILE_SIZE):
     """Destination raster window covering the tiles around a bbox.
 
     Args:
         bounds_3857: bbox in EPSG:3857.
         zoom: zoom level.
+        tile_size: tile raster edge in pixels.
 
     Returns:
         ``(transform, height, width, x0, y0)`` of a raster aligned to
         the tile grid starting tile ``(x0, y0)``.
     """
     x_min, y_min, x_max, y_max = _tile_ranges(bounds_3857, zoom)
-    res = meters_per_pixel(zoom)
-    width = (x_max - x_min + 1) * TILE_SIZE
-    height = (y_max - y_min + 1) * TILE_SIZE
+    res = meters_per_pixel(zoom, tile_size)
+    width = (x_max - x_min + 1) * tile_size
+    height = (y_max - y_min + 1) * tile_size
     transform = Affine(
         res,
         0,
-        -WEB_MERCATOR_WORLD + x_min * TILE_SIZE * res,
+        -WEB_MERCATOR_WORLD + x_min * tile_size * res,
         0,
         -res,
-        WEB_MERCATOR_WORLD - y_min * TILE_SIZE * res,
+        WEB_MERCATOR_WORLD - y_min * tile_size * res,
     )
     return transform, height, width, x_min, y_min
 
@@ -125,8 +130,14 @@ def block_to_tiles(
     encoding: str,
     depth_max: float,
     resolution: float = 50.0,
+    tile_size: int = TILE_SIZE,
 ) -> dict[tuple[int, int, int], bytes]:
     """Reproject one SWEREF99 TM depth block into encoded uint8 mercator tiles.
+
+    The tile raster edge is ``tile_size`` pixels, not the format's
+    fixed 256: PMTiles puts no limit on tile raster dimensions, so a
+    single zoom level can host a fine grid on large tiles (see the
+    1 m depression archive).
 
     Args:
         depth: north-up float32 depression depth array, NaN where no
@@ -138,6 +149,7 @@ def block_to_tiles(
         encoding: depth encoding (``sqrt`` or ``log``).
         depth_max: saturation depth in meters.
         resolution: source resolution in meters.
+        tile_size: tile raster edge in pixels.
 
     Returns:
         Dict mapping ``(zoom, x, y)`` (north-origin scheme) to encoded
@@ -155,7 +167,7 @@ def block_to_tiles(
     )
     w, s, e, n = rasterio.warp.array_bounds(src_height, src_width, src_transform)
     bounds_3857 = rasterio.warp.transform_bounds("EPSG:3006", "EPSG:3857", w, s, e, n)
-    dst_transform, height, width, tx0, ty0 = _alloc_window(bounds_3857, zoom)
+    dst_transform, height, width, tx0, ty0 = _alloc_window(bounds_3857, zoom, tile_size)
 
     dst = np.full((height, width), np.nan, dtype=np.float32)
     rasterio.warp.reproject(
@@ -171,11 +183,11 @@ def block_to_tiles(
     )
 
     tiles = {}
-    for ty in range(height // TILE_SIZE):
-        for tx in range(width // TILE_SIZE):
+    for ty in range(height // tile_size):
+        for tx in range(width // tile_size):
             sl = (
-                slice(ty * TILE_SIZE, (ty + 1) * TILE_SIZE),
-                slice(tx * TILE_SIZE, (tx + 1) * TILE_SIZE),
+                slice(ty * tile_size, (ty + 1) * tile_size),
+                slice(tx * tile_size, (tx + 1) * tile_size),
             )
             tile = dst[sl]
             if np.all(np.isnan(tile)):
