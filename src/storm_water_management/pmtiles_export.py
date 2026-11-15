@@ -233,19 +233,21 @@ def write_pmtiles(
     tiles: dict[tuple[int, int, int], bytes],
     *,
     codec: str,
-    zoom: int,
     encoding: str,
     depth_max: float,
-    resolution: float = 50.0,
+    resolution: float = 1.0,
     metadata_extra: dict | None = None,
 ) -> dict:
     """Write tile bytes into a PMTiles v3 archive.
+
+    The archive may span several zoom levels (a native level plus
+    pooled overview levels); the header min/max zoom values are
+    derived from the tile ids.
 
     Args:
         filepath: output ``.pmtiles`` path.
         tiles: dict mapping ``(zoom, x, y)`` to encoded tile bytes.
         codec: tile codec, ``"webp"`` or ``"avif"``.
-        zoom: zoom level of the archive (single level).
         encoding: depth encoding used (see :mod:`depth_encode`).
         depth_max: saturation depth in meters.
         resolution: source grid resolution in meters.
@@ -254,6 +256,7 @@ def write_pmtiles(
     Returns:
         Summary dict with tile counts and byte totals.
     """
+    zooms = sorted({z for z, _, _ in tiles})
     tile_type = {"webp": TileType.WEBP, "avif": TileType.AVIF}[codec]
 
     metadata = {
@@ -286,9 +289,9 @@ def write_pmtiles(
         "internal_compression": Compression.GZIP,
         "tile_compression": Compression.NONE,
         "tile_type": tile_type,
-        "min_zoom": zoom,
-        "max_zoom": zoom,
-        "center_zoom": zoom,
+        "min_zoom": zooms[0],
+        "max_zoom": zooms[-1],
+        "center_zoom": zooms[-1],
         "min_lon_e7": int(lon_min * 1e7),
         "min_lat_e7": int(lat_min * 1e7),
         "max_lon_e7": int(lon_max * 1e7),

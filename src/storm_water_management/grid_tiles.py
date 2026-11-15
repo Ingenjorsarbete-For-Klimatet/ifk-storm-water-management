@@ -8,9 +8,11 @@ SWEREF 99 TM lattice are simply the rounded easting/northing, and a
 tile's raster is taken over as it is read.
 
 Blocks (tiles) are kept in an LRU cache and assembled with a halo of
-cells from neighbouring tiles, mirroring
-:mod:`storm_water_management.sweden_grid`, so that depressions
-spanning tile borders drain consistently.
+cells from neighbouring tiles, so that depressions spanning tile
+borders drain consistently. Cooperative overview pooling
+(:func:`pool_mean`, :func:`mean_overview_core`) reuses the halo so
+that pooled overview cells assemble across tile borders without
+gaps.
 
 Note:
     The halo is specified in cells (1 cell = 1 m). The default of
@@ -246,3 +248,103 @@ def open_store(data_folder: str) -> GridTileStore:
         The tile store.
     """
     return GridTileStore(data_folder)
+
+
+def core_slice(array: np.ndarray, halo_cells: int = HALO_CELLS) -> np.ndarray:
+    """Cut a block's core out of a halo-padded array.
+
+    Args:
+        array: halo-padded array from :func:`assemble_block`.
+        halo_cells: padding that was used when assembling.
+
+    Returns:
+        View of the block's own footprint.
+    """
+    return array[halo_cells:-halo_cells, halo_cells:-halo_cells]
+
+
+def pool_mean(array: np.ndarray, factor: int) -> np.ndarray:
+    """Mean of non-overlapping ``factor x factor`` blocks, NaN-aware.
+
+    Cells at the array edges that do not fill a complete block are
+    dropped. A block with at least one non-NaN cell holds the mean of
+    its non-NaN cells; all-NaN blocks stay NaN.
+
+    Args:
+        array: north-up float array, NaN where no data.
+        factor: block edge in cells.
+
+    Returns:
+        Pooled array of shape ``(h // factor, w // factor)``.
+    """
+    h, w = array.shape
+    bh = (h // factor) * factor
+    bw = (w // factor) * factor
+    blocks = array[:bh, :bw].reshape(bh // factor, factor, bw // factor, factor)
+    sums = np.nansum(blocks, axis=(1, 3), dtype=np.float64)
+    counts = np.isfinite(blocks).sum(axis=(1, 3), dtype=np.float64)
+    out = np.full(sums.shape, np.float32("nan"), dtype=np.float32)
+    np.divide(sums, counts, out=out, where=counts > 0)
+    return out
+
+
+def mean_overview_core(
+    depth_padded: np.ndarray,
+    x_min_cell: int,
+    y_min_cell: int,
+    halo_cells: int,
+    factor: int,
+) -> tuple[np.ndarray, float, float]:
+    """Mean-pool a halo-padded block onto the global pooled lattice.
+
+    The padded array is first trimmed so that pooled cell boundaries
+    land on multiples of ``factor`` on the global SWEREF 99 TM cell
+    lattice, then pooled with :func:`pool_mean`. Of the pooled cells,
+    only those whose south-west corner falls inside the block's own
+    footprint are returned; every pooled cell is thus owned by
+    exactly one block and neighbouring blocks assemble without gaps
+    or overlaps. The halo covers the cells beyond the block's own
+    footprint, so ``halo_cells >= factor`` is required.
+
+    Args:
+        depth_padded: halo-padded depth array from
+            :func:`assemble_block` + the fill, north-up.
+        x_min_cell: west cell index of the padded array.
+        y_min_cell: south cell index of the padded array.
+        halo_cells: padding of the array.
+        factor: pooling factor in cells.
+
+    Returns:
+        ``(mean_core, x_min_pooled, y_min_pooled)``; the pooled array
+        is north-up and covers the block's pooled footprint, the
+        origins are in pooled-cell units on the global lattice
+        (0.5 means half a cell).
+    """
+    if factor > halo_cells:
+        raise ValueError(f"halo_cells ({halo_cells}) must be >= factor ({factor})")
+    h, w = depth_padded.shape
+    dx = (-x_min_cell) % factor
+    dy = (-y_min_cell) % factor
+    px0 = x_min_cell + dx
+    py0 = y_min_cell + dy
+    w2 = w - dx - (w - dx) % factor
+    h2 = h - dy - (h - dy) % factor
+
+    south_up = depth_padded[::-1, :][dy : dy + h2, dx : dx + w2]
+    pooled = pool_mean(south_up, factor)
+
+    core_w = w - 2 * halo_cells
+    core_h = h - 2 * halo_cells
+    gx = px0 + np.arange(pooled.shape[1]) * factor
+    keep_x = (gx >= x_min_cell + halo_cells) & (gx < x_min_cell + halo_cells + core_w)
+    gy = py0 + np.arange(pooled.shape[0]) * factor
+    keep_y = (gy >= y_min_cell + halo_cells) & (gy < y_min_cell + halo_cells + core_h)
+
+    cols = np.nonzero(keep_x)[0]
+    rows = np.nonzero(keep_y)[0]
+    if len(rows) == 0 or len(cols) == 0:
+        raise ValueError("no pooled cells owned by this block's core")
+    out = pooled[np.ix_(rows, cols)][::-1, :]
+    x_min_pooled = (px0 + cols[0] * factor) / factor
+    y_min_pooled = (py0 + rows[0] * factor) / factor
+    return out, x_min_pooled, y_min_pooled
