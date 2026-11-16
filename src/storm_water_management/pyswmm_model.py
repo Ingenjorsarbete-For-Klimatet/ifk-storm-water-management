@@ -1,4 +1,4 @@
-"""Utilities for building and running conceptual PySWMM storage models."""
+"""Build and run conceptual PySWMM storage models from DEM-derived basins."""
 
 from __future__ import annotations
 
@@ -11,12 +11,15 @@ from pathlib import Path
 import geopandas as gpd
 import numpy as np
 import rasterio
+from pyswmm import Links, Nodes, Simulation
 
 from storm_water_management.config import PySwmmConfig
 
 RAINFALL_INTERVAL_MINUTES = 5
 CURVE_POINTS = 31
 MINIMUM_STORAGE_DEPTH_M = 0.001
+SPILL_DESIGN_DEPTH_M = 0.1
+SPILL_DESIGN_VELOCITY_M_S = 1.0
 SIMULATION_START = datetime(2025, 1, 1, 0, 0)
 
 
@@ -60,6 +63,27 @@ class BasinGeometry:
     curve: tuple[tuple[float, float], ...]
     raster_cell_count: int
     curve_capacity_m3: float
+
+
+def spill_channel_width_for_basin(
+    basin: Basin,
+    rainfall_mm: float,
+    duration_hours: float,
+    minimum_width_m: float,
+) -> float:
+    """Width that conveys the basin's design peak inflow without throttling.
+
+    The design inflow is the constant-intensity runoff of the effective
+    rainfall over the basin's own incremental area. The width follows from a
+    rectangular cross-section at the design depth and velocity, so the
+    conceptual spillway routes the DEM spill cascade instead of discarding
+    overflow as node flooding.
+    """
+    peak_inflow_m3s = (
+        rainfall_mm / 1000.0 * basin.incremental_area_m2 / (duration_hours * 3600.0)
+    )
+    conveyance_per_m = SPILL_DESIGN_DEPTH_M * SPILL_DESIGN_VELOCITY_M_S
+    return max(minimum_width_m, peak_inflow_m3s / conveyance_per_m)
 
 
 def load_basins(
@@ -489,9 +513,12 @@ def render_swmm_input(
     )
     for basin in basins:
         channel_height_m = max(geometries[basin.basin_id].maximum_depth_m + 0.1, 0.2)
+        width_m = spill_channel_width_for_basin(
+            basin, rainfall_mm, duration_hours, spill_channel_width_m
+        )
         sections.append(
             f"W{basin.basin_id:05d} RECT_OPEN {channel_height_m:.6f} "
-            f"{spill_channel_width_m:.6g} 0 0 1"
+            f"{width_m:.6g} 0 0 1"
         )
     sections.extend(["", "[OUTFALLS]", ";;Name  Elevation  Type  StageData  Gated"])
     if external_runoff_area_m2 > 0:
@@ -529,20 +556,14 @@ def run_model(
     report_path: Path,
     output_path: Path,
     basins: list[Basin],
+    outfall_node_ids: list[str],
     report_interval_minutes: int,
     output_dir: Path,
-) -> tuple[Path, Path, Path]:
+) -> tuple[Path, Path, Path, Path]:
     """Run SWMM through PySWMM and export node, link and basin summaries."""
-    try:
-        from pyswmm import Links, Nodes, Simulation
-    except ImportError as exc:
-        raise RuntimeError(
-            "PySWMM is required. Install the optional dependency with "
-            "pip install -e '.[swmm]'."
-        ) from exc
-
     node_series_path = output_dir / "node_timeseries.csv"
     link_series_path = output_dir / "spill_link_timeseries.csv"
+    outfall_series_path = output_dir / "outfall_timeseries.csv"
     basin_summary_path = output_dir / "pyswmm_basin_summary.csv"
     maxima: dict[str, dict[str, float]] = {
         basin.node_id: {
@@ -558,6 +579,7 @@ def run_model(
     with (
         node_series_path.open("w", newline="", encoding="utf-8") as node_file,
         link_series_path.open("w", newline="", encoding="utf-8") as link_file,
+        outfall_series_path.open("w", newline="", encoding="utf-8") as outfall_file,
     ):
         node_writer = csv.DictWriter(
             node_file,
@@ -576,8 +598,13 @@ def run_model(
             link_file,
             fieldnames=["datetime", "basin_id", "link_id", "flow_m3s", "depth_m"],
         )
+        outfall_writer = csv.DictWriter(
+            outfall_file,
+            fieldnames=["datetime", "total_outfall_inflow_m3s"],
+        )
         node_writer.writeheader()
         link_writer.writeheader()
+        outfall_writer.writeheader()
         with Simulation(str(input_path), str(report_path), str(output_path)) as sim:
             sim.step_advance(report_interval_minutes * 60)
             nodes = Nodes(sim)
@@ -624,6 +651,15 @@ def run_model(
                             "depth_m": float(link.depth),
                         }
                     )
+                outfall_writer.writerow(
+                    {
+                        "datetime": timestamp,
+                        "total_outfall_inflow_m3s": sum(
+                            float(nodes[node_id].total_inflow)
+                            for node_id in outfall_node_ids
+                        ),
+                    }
+                )
     with basin_summary_path.open("w", newline="", encoding="utf-8") as output:
         writer = csv.DictWriter(
             output,
@@ -663,7 +699,7 @@ def run_model(
             )
     _write_run_metadata(output_dir, report_path)
     _write_peak_geopackage(output_dir, basin_summary_path, basins)
-    return node_series_path, link_series_path, basin_summary_path
+    return node_series_path, link_series_path, outfall_series_path, basin_summary_path
 
 
 def _write_run_metadata(output_dir: Path, report_path: Path) -> None:
@@ -732,11 +768,14 @@ def write_model_notes(
     geometries: dict[int, BasinGeometry],
     rainfall_mm: float,
     duration_hours: float,
+    drain_hours: float,
     report_interval_minutes: int,
     cell_area_m2: float,
     source_basin_count: int,
     minimum_storage_basin_area_m2: float,
     external_runoff_area_m2: float,
+    spill_channel_width_m: float,
+    spill_channel_roughness: float,
 ) -> None:
     """Record assumptions, provenance and raster-to-curve capacity checks."""
     path = output_dir / "model_notes.txt"
@@ -759,6 +798,9 @@ def write_model_notes(
             f"Effective rainfall: {rainfall_mm:.6g} mm over {duration_hours:g} h.\n"
         )
         output.write(
+            f"Simulation window: {duration_hours:g} h storm + {drain_hours:g} h drain.\n"
+        )
+        output.write(
             "Temporal pattern: constant intensity; source data has no hyetograph.\n"
         )
         output.write(
@@ -774,7 +816,13 @@ def write_model_notes(
             "Zero-capacity basins use a 1 mm minimum storage depth for SWMM numerical validity.\n"
         )
         output.write(
-            "Spillways: conceptual rectangular open channels at basin sills; channel dimensions and roughness are assumptions.\n"
+            "Spillways: conceptual rectangular open channels at basin sills; "
+            "each width is sized to convey the basin's design peak inflow "
+            f"({rainfall_mm:.6g} mm over its incremental area at "
+            f"{SPILL_DESIGN_DEPTH_M:g} m depth and "
+            f"{SPILL_DESIGN_VELOCITY_M_S:g} m/s) with a "
+            f"{spill_channel_width_m:g} m minimum; "
+            f"roughness {spill_channel_roughness:g} is an assumption.\n"
         )
         output.write(f"Sample interval: {report_interval_minutes} minutes.\n")
         output.write(
@@ -846,17 +894,26 @@ def run_pyswmm_analysis(
         geometries,
         rainfall_mm,
         config.duration_hours,
+        config.drain_hours,
         config.report_interval_minutes,
         cell_area_m2,
         len(source_basins),
         config.minimum_storage_basin_area_m2,
         external_runoff_area_m2,
+        config.spill_channel_width_m,
+        config.spill_channel_roughness,
     )
-    node_csv, link_csv, basin_csv = run_model(
+    outfall_node_ids = [
+        f"O{basin.basin_id:05d}" for basin in basins if not basin.downstream_basin_id
+    ]
+    if external_runoff_area_m2 > 0:
+        outfall_node_ids.append("OF1")
+    node_csv, link_csv, outfall_csv, basin_csv = run_model(
         input_path,
         report_path,
         output_path,
         basins,
+        outfall_node_ids,
         config.report_interval_minutes,
         output_dir,
     )
@@ -868,5 +925,6 @@ def run_pyswmm_analysis(
     print(f"SWMM input: {input_path}")
     print(f"Node time series: {node_csv}")
     print(f"Spill-link time series: {link_csv}")
+    print(f"Outfall time series: {outfall_csv}")
     print(f"Basin summary: {basin_csv}")
     print(f"Assumptions and capacity check: {output_dir / 'model_notes.txt'}")

@@ -21,18 +21,14 @@ from storm_water_management.config import (  # noqa: E402
     DownloadConfig,
     PySwmmConfig,
 )
+from storm_water_management.depth_polygons import write_depth_class_polygons  # noqa: E402
 from storm_water_management.elevation_download import download_elevation_tiles  # noqa: E402
-from storm_water_management import postprocess  # noqa: E402
-from storm_water_management.storm_scenario import (  # noqa: E402
-    run_terrain_analysis,
-)
-from storm_water_management.utils_plots import (  # noqa: E402
+from storm_water_management.plotting import (  # noqa: E402
     create_pyswmm_plot,
     create_terrain_plot,
 )
-from storm_water_management.utils_pyswmm import (  # noqa: E402
-    run_pyswmm_analysis,
-)
+from storm_water_management.pyswmm_model import run_pyswmm_analysis  # noqa: E402
+from storm_water_management.terrain_analysis import run_terrain_analysis  # noqa: E402
 
 TILE_DIR = REPOSITORY_ROOT / "data" / "elevation" / "enkoping"
 RESULTS_DIR = REPOSITORY_ROOT / "results" / "enkoping"
@@ -76,7 +72,9 @@ def run_pipeline(
         raise ValueError(f"Unknown scenario: {scenario}")
     output_prefix = analysis.output_prefix
     if analysis.dry_run and (scenario != "terrain" or download or plot):
-        raise ValueError("dry_run is only available for a terrain-only pipeline with plot=False.")
+        raise ValueError(
+            "dry_run is only available for a terrain-only pipeline with plot=False."
+        )
 
     if download:
         print("[1] Download elevation tiles")
@@ -122,9 +120,7 @@ def run_pipeline(
             ]
         )
     for depth_raster in depth_rasters:
-        postprocess.write_geojson_polygons_from_tif_to_file(
-            str(depth_raster), output_format="FlatGeobuf"
-        )
+        write_depth_class_polygons(depth_raster, output_format="FlatGeobuf")
         polygon_path = depth_raster.with_name(f"{depth_raster.stem}_polygons.fgb")
         print(f"FlatGeobuf polygons: {polygon_path}")
 
@@ -133,9 +129,11 @@ def run_pipeline(
         print(f"[{stage_number}] Run conceptual PySWMM scenario")
         run_pyswmm_analysis(
             pyswmm,
-            basin_summary_path=output_dir / f"{output_prefix}_buffered_basin_summary.csv",
+            basin_summary_path=output_dir
+            / f"{output_prefix}_buffered_basin_summary.csv",
             dem_path=output_dir / f"{output_prefix}_buffered_dem.tif",
-            basin_ids_path=output_dir / f"{output_prefix}_buffered_depression_basin_id.tif",
+            basin_ids_path=output_dir
+            / f"{output_prefix}_buffered_depression_basin_id.tif",
             output_dir=output_dir / "pyswmm",
         )
     if not plot:
@@ -163,6 +161,7 @@ def run_pipeline(
         swmm_dir / "pyswmm_basin_peaks.gpkg",
         swmm_dir / "node_timeseries.csv",
         swmm_dir / "spill_link_timeseries.csv",
+        swmm_dir / "outfall_timeseries.csv",
         swmm_dir / "pyswmm_basin_summary.csv",
         output_dir / f"{output_prefix}_buffered_depression_basin_id.tif",
         output_dir / f"{output_prefix}_buffered_dem.tif",

@@ -2,10 +2,13 @@
 
 import pytest
 
-from storm_water_management.utils_pyswmm import (
+from storm_water_management.pyswmm_model import (
     Basin,
+    BasinGeometry,
     load_basins,
+    render_swmm_input,
     select_storage_basins,
+    spill_channel_width_for_basin,
 )
 
 NETWORK_COLUMNS = (
@@ -103,3 +106,71 @@ def test_censored_basins_route_to_boundary_instead_of_storage():
 
     assert [basin.basin_id for basin in modeled] == [2]
     assert external_area == 120.0
+
+
+def _geometry(floor_m: float) -> BasinGeometry:
+    """Return a minimal storage geometry with a one-point stage-area curve."""
+    return BasinGeometry(
+        floor_elevation_m=floor_m,
+        maximum_depth_m=0.5,
+        curve=((0.0, 10.0), (0.5, 20.0)),
+        raster_cell_count=10,
+        curve_capacity_m3=5.0,
+    )
+
+
+def _basin(basin_id: int, area_m2: float) -> Basin:
+    """Return a storage basin with the given incremental runoff area."""
+    return Basin(
+        basin_id=basin_id,
+        incremental_area_m2=area_m2,
+        spill_elevation_m=10.0,
+        downstream_basin_id=0,
+        status="spills_out_of_analysis_area",
+        outlet_x=None,
+        outlet_y=None,
+        source_capacity_m3=5.0,
+        source_area_m2=20.0,
+        crs="EPSG:3006",
+    )
+
+
+def test_spillway_width_scales_with_design_inflow():
+    """Spillway width conveys the basin's design inflow and respects the minimum."""
+    small = _basin(1, 100.0)
+    large = _basin(2, 36_000.0)
+
+    assert spill_channel_width_for_basin(small, 100.0, 1.0, 1.0) == pytest.approx(1.0)
+    # 100 mm over 36,000 m2 in 1 h is 1 m3/s; at 0.1 m depth and 1 m/s that is 10 m.
+    assert spill_channel_width_for_basin(large, 100.0, 1.0, 1.0) == pytest.approx(10.0)
+
+
+def test_rendered_xsections_use_per_basin_width():
+    """The SWMM input sizes each spill channel from its own basin's inflow."""
+    basins = [_basin(1, 100.0), _basin(2, 36_000.0)]
+    geometries = {basin.basin_id: _geometry(5.0) for basin in basins}
+
+    text = render_swmm_input(
+        basins,
+        geometries,
+        100.0,
+        duration_hours=1.0,
+        drain_hours=11.0,
+        spill_channel_width_m=1.0,
+        spill_channel_roughness=0.03,
+        report_interval_minutes=5,
+        external_runoff_area_m2=0.0,
+    )
+    xsections = text.split("[XSECTIONS]")[1].split("[OUTFALLS]")[0]
+
+    assert "W00001 RECT_OPEN" in xsections
+    assert "W00002 RECT_OPEN" in xsections
+    small_line = next(
+        line for line in xsections.splitlines() if line.startswith("W00001")
+    )
+    large_line = next(
+        line for line in xsections.splitlines() if line.startswith("W00002")
+    )
+
+    assert float(small_line.split()[3]) == pytest.approx(1.0)
+    assert float(large_line.split()[3]) == pytest.approx(10.0)

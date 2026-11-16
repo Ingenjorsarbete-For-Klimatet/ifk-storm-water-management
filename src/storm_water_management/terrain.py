@@ -1,4 +1,4 @@
-"""Reusable raster and terrain-workflow helpers."""
+"""Raster and terrain processing steps: tiles, mosaic, depression fill, clip."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from rasterio.mask import mask
 from rasterio.merge import merge
 from shapely.geometry import box, mapping
 from whitebox_workflows import WbEnvironment
+
+from storm_water_management.config import DEFAULT_INFILTRATION_FRACTION
 
 WANG_LIU_FLAT_INCREMENT_M = 0.001
 
@@ -175,7 +177,11 @@ def effective_rainfall_m(
     infiltration_capacity_mm_h: float | None = None,
     rainfall_duration_hours: float | None = None,
 ) -> float:
-    """Return event rainfall remaining after the uniform infiltration loss."""
+    """Return event rainfall remaining after the uniform infiltration loss.
+
+    Without an infiltration capacity, an unspecified ``infiltration_fraction``
+    falls back to the shared ``DEFAULT_INFILTRATION_FRACTION``.
+    """
     if not np.isfinite(rainfall_mm) or rainfall_mm < 0:
         raise ValueError("Rainfall depth must be a finite, non-negative value.")
     if infiltration_capacity_mm_h is not None:
@@ -194,155 +200,15 @@ def effective_rainfall_m(
             )
         infiltrated_mm = infiltration_capacity_mm_h * rainfall_duration_hours
     else:
-        fraction = 0.5 if infiltration_fraction is None else infiltration_fraction
+        fraction = (
+            DEFAULT_INFILTRATION_FRACTION
+            if infiltration_fraction is None
+            else infiltration_fraction
+        )
         if not np.isfinite(fraction) or not 0 <= fraction <= 1:
             raise ValueError("The infiltration fraction must be between 0 and 1.")
         infiltrated_mm = rainfall_mm * fraction
     return max(0.0, rainfall_mm - infiltrated_mm) / 1000.0
-
-
-def estimate_runoff_volume_m3(
-    contributing_area_m2: np.ndarray,
-    upslope_storage_depth_m: np.ndarray,
-    effective_rain_m: float,
-) -> np.ndarray:
-    """Legacy per-cell runoff approximation after average upslope storage."""
-    runoff_depth_m = np.maximum(effective_rain_m - upslope_storage_depth_m, 0.0)
-    return contributing_area_m2 * runoff_depth_m
-
-
-def estimate_ponding_depth_m(
-    upslope_storage_depth_m: np.ndarray,
-    local_depression_depth_m: np.ndarray,
-    effective_rain_m: float,
-) -> np.ndarray:
-    """Estimate ponding depth, capped by rainfall and local depression depth."""
-    available_water_m = np.maximum(effective_rain_m - upslope_storage_depth_m, 0.0)
-    return np.minimum(available_water_m, np.maximum(local_depression_depth_m, 0.0))
-
-
-def write_estimated_runoff_volume(
-    contributing_area_path: Path,
-    upslope_storage_path: Path,
-    output_path: Path,
-    effective_rain_m: float,
-) -> Path:
-    """Write the legacy per-cell runoff-volume raster in memory-bounded windows."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with (
-        rasterio.open(contributing_area_path) as area_source,
-        rasterio.open(upslope_storage_path) as storage_source,
-    ):
-        if (
-            area_source.shape != storage_source.shape
-            or area_source.transform != storage_source.transform
-            or area_source.crs != storage_source.crs
-        ):
-            raise ValueError(
-                "Contributing-area and upslope-storage rasters are not aligned."
-            )
-        nodata = area_source.nodata if area_source.nodata is not None else -9999.0
-        metadata = area_source.profile.copy()
-        metadata.pop("blockxsize", None)
-        metadata.pop("blockysize", None)
-        metadata.update(
-            driver="GTiff",
-            count=1,
-            dtype="float32",
-            nodata=nodata,
-            compress="lzw",
-            tiled=True,
-        )
-        with rasterio.open(output_path, "w", **metadata) as destination:
-            for row_off in range(0, area_source.height, 512):
-                for col_off in range(0, area_source.width, 512):
-                    window = rasterio.windows.Window(
-                        col_off,
-                        row_off,
-                        min(512, area_source.width - col_off),
-                        min(512, area_source.height - row_off),
-                    )
-                    area = area_source.read(1, window=window, masked=True)
-                    storage = storage_source.read(1, window=window, masked=True)
-                    area_values = np.asarray(area.data, dtype=np.float64)
-                    storage_values = np.asarray(storage.data, dtype=np.float64)
-                    valid = (
-                        ~np.ma.getmaskarray(area)
-                        & ~np.ma.getmaskarray(storage)
-                        & np.isfinite(area_values)
-                        & np.isfinite(storage_values)
-                    )
-                    result = np.full(area_values.shape, nodata, dtype=np.float32)
-                    result[valid] = estimate_runoff_volume_m3(
-                        area_values[valid], storage_values[valid], effective_rain_m
-                    ).astype(np.float32)
-                    destination.write(result, 1, window=window)
-    return output_path
-
-
-def write_estimated_ponding_depth(
-    upslope_storage_path: Path,
-    depression_depth_path: Path,
-    output_path: Path,
-    effective_rain_m: float,
-) -> Path:
-    """Write the legacy local ponding approximation in metre units by window."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with (
-        rasterio.open(upslope_storage_path) as storage_source,
-        rasterio.open(depression_depth_path) as depression_source,
-    ):
-        if (
-            storage_source.shape != depression_source.shape
-            or storage_source.transform != depression_source.transform
-            or storage_source.crs != depression_source.crs
-        ):
-            raise ValueError(
-                "Upslope-storage and depression-depth rasters are not aligned."
-            )
-        nodata = (
-            depression_source.nodata
-            if depression_source.nodata is not None
-            else -9999.0
-        )
-        metadata = depression_source.profile.copy()
-        metadata.pop("blockxsize", None)
-        metadata.pop("blockysize", None)
-        metadata.update(
-            driver="GTiff",
-            count=1,
-            dtype="float32",
-            nodata=nodata,
-            compress="lzw",
-            tiled=True,
-        )
-        with rasterio.open(output_path, "w", **metadata) as destination:
-            for row_off in range(0, depression_source.height, 512):
-                for col_off in range(0, depression_source.width, 512):
-                    window = rasterio.windows.Window(
-                        col_off,
-                        row_off,
-                        min(512, depression_source.width - col_off),
-                        min(512, depression_source.height - row_off),
-                    )
-                    storage = storage_source.read(1, window=window, masked=True)
-                    depression = depression_source.read(1, window=window, masked=True)
-                    storage_values = np.asarray(storage.data, dtype=np.float64)
-                    depression_values = np.asarray(depression.data, dtype=np.float64)
-                    valid = (
-                        ~np.ma.getmaskarray(storage)
-                        & ~np.ma.getmaskarray(depression)
-                        & np.isfinite(storage_values)
-                        & np.isfinite(depression_values)
-                    )
-                    result = np.full(storage_values.shape, nodata, dtype=np.float32)
-                    result[valid] = estimate_ponding_depth_m(
-                        storage_values[valid],
-                        depression_values[valid],
-                        effective_rain_m,
-                    ).astype(np.float32)
-                    destination.write(result, 1, window=window)
-    return output_path
 
 
 def clip_to_area(

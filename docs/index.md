@@ -18,7 +18,7 @@ by the data service.
 `AnalysisConfig` and `PySwmmConfig` are defined in
 [config.py](../src/storm_water_management/config.py). The
 `run_terrain_analysis()` function is defined in
-[storm_scenario.py](../src/storm_water_management/storm_scenario.py). Supply the
+[terrain_analysis.py](../src/storm_water_management/terrain_analysis.py). Supply the
 input/output directories, center coordinates, and an output prefix explicitly;
 the package does not choose a geographic location:
 
@@ -26,7 +26,7 @@ the package does not choose a geographic location:
 from pathlib import Path
 
 from storm_water_management.config import AnalysisConfig
-from storm_water_management.storm_scenario import run_terrain_analysis
+from storm_water_management.terrain_analysis import run_terrain_analysis
 
 config = AnalysisConfig(
     input_dir=Path("data/elevation/tiles"),
@@ -53,14 +53,14 @@ calibrated hydraulic flood model.
 `PySwmmConfig` is defined in
 [config.py](../src/storm_water_management/config.py), and
 `run_pyswmm_analysis()` is defined in
-[utils_pyswmm.py](../src/storm_water_management/utils_pyswmm.py). Provide the
+[pyswmm_model.py](../src/storm_water_management/pyswmm_model.py). Provide the
 summary, DEM, basin-ID, and output paths explicitly:
 
 ```python
 from pathlib import Path
 
 from storm_water_management.config import PySwmmConfig
-from storm_water_management.utils_pyswmm import run_pyswmm_analysis
+from storm_water_management.pyswmm_model import run_pyswmm_analysis
 
 run_pyswmm_analysis(
     PySwmmConfig(effective_rainfall_mm=100, duration_hours=6),
@@ -71,14 +71,13 @@ run_pyswmm_analysis(
 )
 ```
 
-Install the optional dependency with `pip install -e '.[swmm]'`. The conceptual
-model uses DEM-derived storage basins, uniform net rainfall, and assumed
-routing parameters; its results are exploratory and not infrastructure-grade
-flood predictions.
+The conceptual model uses DEM-derived storage basins, uniform net rainfall, and
+assumed routing parameters; its results are exploratory and not
+infrastructure-grade flood predictions.
 
 ## Visualization
 
 Plot functions are available in
-[utils_plots.py](../src/storm_water_management/utils_plots.py). They take input
+[plotting.py](../src/storm_water_management/plotting.py). They take input
 raster/vector paths and output image paths directly, so callers can organize
 results for any study area.

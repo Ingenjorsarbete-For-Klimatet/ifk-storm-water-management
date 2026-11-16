@@ -2,7 +2,7 @@
 
 import pytest
 
-from storm_water_management.utils_workflows import projected_center
+from storm_water_management.terrain import projected_center
 
 
 def test_projected_center_converts_supplied_wgs84_coordinates():
@@ -11,7 +11,6 @@ def test_projected_center_converts_supplied_wgs84_coordinates():
     nearby = projected_center(17.0878, 59.6356)
 
     assert nearby[0] > enkoping[0]
-    assert nearby != enkoping
 
 
 @pytest.mark.parametrize(

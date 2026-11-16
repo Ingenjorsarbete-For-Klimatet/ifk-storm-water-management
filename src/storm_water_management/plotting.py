@@ -1,12 +1,8 @@
 """Plot terrain/rainfall rasters and conceptual PySWMM results."""
 
-# ruff: noqa: W191
-
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
-from typing import Sequence
 
 import geopandas as gpd
 import matplotlib
@@ -21,7 +17,6 @@ import rasterio
 from matplotlib.colors import BoundaryNorm, ListedColormap, LogNorm, Normalize
 from rasterio.enums import Resampling
 
-RESULTS_DIR = Path("results")
 DEPTH_LIMITS_M = (0.1, 0.2, 0.5, 1.0, float("inf"))
 DEPTH_LABELS = ("0.1–0.2 m", "0.2–0.5 m", "0.5–1 m", ">1 m")
 DEPTH_COLORS = ("#440154", "#31688e", "#35b779", "#fde725")
@@ -182,18 +177,9 @@ def create_terrain_plot(
     scenario_max = 0.0
     positive_cells = 0
     if scenario_path is not None:
-        if not scenario_path.is_file():
-            raise FileNotFoundError(f"Scenario raster not found: {scenario_path}")
+        # Existence and grid alignment were verified when the optional raster
+        # was accepted above.
         with rasterio.open(scenario_path) as scenario_src:
-            if (
-                scenario_src.crs != crs
-                or scenario_src.transform != transform
-                or scenario_src.width != raster_width
-                or scenario_src.height != raster_height
-            ):
-                raise ValueError(
-                    "Scenario raster must align with the depression raster."
-                )
             scenario = _display_raster(scenario_src, max_display_pixels)
             scenario = np.ma.masked_less_equal(scenario, 0)
             scenario_max = float(scenario.max()) if scenario.count() else 0.0
@@ -237,16 +223,8 @@ def create_terrain_plot(
                 )
             axes[2].set_title("Accumulated runoff volume")
     elif flow_accumulation_path is not None:
+        # Grid alignment was verified when the optional raster was accepted.
         with rasterio.open(flow_accumulation_path) as flow_src:
-            if (
-                flow_src.crs != crs
-                or flow_src.transform != transform
-                or flow_src.width != raster_width
-                or flow_src.height != raster_height
-            ):
-                raise ValueError(
-                    "Flow-accumulation raster must align with the depression raster."
-                )
             flow = np.ma.masked_less_equal(
                 _display_raster(flow_src, max_display_pixels), 0
             )
@@ -407,6 +385,7 @@ def create_pyswmm_plot(
     peaks_path: Path,
     node_path: Path,
     link_path: Path,
+    outfall_path: Path | None,
     summary_path: Path,
     basin_ids_path: Path,
     dem_path: Path,
@@ -445,6 +424,12 @@ def create_pyswmm_plot(
         links.loc[links.basin_id.isin(boundary)].groupby("datetime").flow_m3s.sum()
     )
     totals["outflow"] = outflow.reindex(totals.index, fill_value=0)
+    outfall_total = None
+    if outfall_path is not None and Path(outfall_path).is_file():
+        outfall = pd.read_csv(outfall_path, parse_dates=["datetime"])
+        outfall_total = (
+            outfall.groupby("datetime").total_outfall_inflow_m3s.sum()
+        ).reindex(totals.index, fill_value=0)
 
     bounds = peaks.total_bounds
     margin_x = max((bounds[2] - bounds[0]) * 0.04, 1.0)
@@ -564,10 +549,13 @@ def create_pyswmm_plot(
         axis.set_aspect("equal", adjustable="box")
         axis.grid(alpha=0.2)
 
-    hydro_ax.plot(totals.index, totals.outflow, label="Boundary outflow")
-    hydro_ax.plot(totals.index, totals.flooding, label="Node flooding")
+    if outfall_total is not None:
+        hydro_ax.plot(totals.index, outfall_total, label="Total outfall discharge")
+    hydro_ax.plot(totals.index, totals.outflow, label="Spill flow to boundary outfalls")
+    hydro_ax.plot(totals.index, totals.flooding, label="Node flooding (basin overflow)")
+    hydro_ax.set_yscale("log")
     hydro_ax.set_title("Aggregate discharge rates")
-    hydro_ax.set_ylabel("Rate (m³/s)")
+    hydro_ax.set_ylabel("Rate (m³/s, log scale)")
     hydro_ax.legend()
     storage_ax.plot(totals.index, totals.stored / 1_000_000, color="#238b57")
     storage_ax.fill_between(
@@ -590,77 +578,3 @@ def create_pyswmm_plot(
     fig.savefig(output_path, dpi=180, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"PySWMM visualization written to {output_path}")
-
-
-def main(plot_type: str, argv: Sequence[str] | None = None) -> None:
-    """Run one of the package plotting workflows from its example CLI."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    if plot_type == "terrain":
-        parser.add_argument(
-            "--raster", type=Path, default=RESULTS_DIR / "depression_depth.tif"
-        )
-        parser.add_argument(
-            "--elevation", type=Path, default=RESULTS_DIR / "buffered_dem.tif"
-        )
-        parser.add_argument(
-            "--output", type=Path, default=RESULTS_DIR / "depression_depth_plot.png"
-        )
-        parser.add_argument("--flow-accumulation", type=Path)
-        parser.add_argument("--ponding-depth", type=Path)
-        parser.add_argument("--runoff-volume", type=Path)
-        parser.add_argument("--max-display-pixels", type=int, default=1600)
-        args = parser.parse_args(argv)
-        if args.max_display_pixels < 100:
-            parser.error("--max-display-pixels must be at least 100")
-        create_terrain_plot(
-            args.raster,
-            args.elevation,
-            args.output,
-            args.max_display_pixels,
-            args.runoff_volume,
-            args.ponding_depth,
-            args.flow_accumulation,
-        )
-    elif plot_type == "pyswmm":
-        directory = RESULTS_DIR / "pyswmm"
-        parser.add_argument(
-            "--peaks", type=Path, default=directory / "pyswmm_basin_peaks.gpkg"
-        )
-        parser.add_argument(
-            "--nodes", type=Path, default=directory / "node_timeseries.csv"
-        )
-        parser.add_argument(
-            "--links", type=Path, default=directory / "spill_link_timeseries.csv"
-        )
-        parser.add_argument(
-            "--summary", type=Path, default=directory / "pyswmm_basin_summary.csv"
-        )
-        parser.add_argument(
-            "--basin-ids",
-            type=Path,
-            default=RESULTS_DIR / "buffered_depression_basin_id.tif",
-        )
-        parser.add_argument(
-            "--dem", type=Path, default=RESULTS_DIR / "buffered_dem.tif"
-        )
-        parser.add_argument(
-            "--output", type=Path, default=directory / "pyswmm_results.png"
-        )
-        parser.add_argument("--max-display-pixels", type=int, default=1400)
-        parser.add_argument("--minimum-flow-m3s", type=float, default=0.005)
-        args = parser.parse_args(argv)
-        if args.max_display_pixels < 100 or args.minimum_flow_m3s < 0:
-            parser.error("display pixels must be ≥100 and flow threshold non-negative")
-        create_pyswmm_plot(
-            args.peaks,
-            args.nodes,
-            args.links,
-            args.summary,
-            args.basin_ids,
-            args.dem,
-            args.output,
-            args.max_display_pixels,
-            args.minimum_flow_m3s,
-        )
-    else:
-        raise ValueError(f"Unknown plot type: {plot_type}")

@@ -5,7 +5,7 @@ import pytest
 import rasterio
 from rasterio.transform import from_origin
 
-from storm_water_management.storm_scenario import (
+from storm_water_management.basin_network import (
     simulate_basin_storage_spill,
     write_basin_network_outputs,
     write_basin_storage_spill_outputs,

@@ -1,10 +1,10 @@
-"""Tests for plot utilities."""
+"""Tests for result plotting."""
 
 import numpy as np
 import rasterio
 from rasterio.transform import from_origin
 
-from storm_water_management.utils_plots import create_terrain_plot
+from storm_water_management.plotting import create_terrain_plot
 
 
 def test_create_terrain_plot_ignores_misaligned_optional_scenario(tmp_path):

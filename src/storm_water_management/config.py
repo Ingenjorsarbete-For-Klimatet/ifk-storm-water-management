@@ -1,10 +1,14 @@
-"""Configuration dataclasses for elevation, terrain, and SWMM workflows."""
+"""Configuration dataclasses and shared defaults for the analysis workflows."""
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
 from pathlib import Path
+
+# Uniform infiltration fraction assumed by every rainfall analysis that gives
+# no infiltration fraction or capacity of its own.
+DEFAULT_INFILTRATION_FRACTION = 0.5
 
 
 @dataclass(frozen=True)
@@ -139,8 +143,8 @@ class PySwmmConfig:
     """Inputs and options for one location-independent conceptual SWMM run."""
 
     effective_rainfall_mm: float = 100.0
-    duration_hours: float = 1.0
-    drain_hours: float = 1.0
+    duration_hours: float = 0.5
+    drain_hours: float = 0.5
     report_interval_minutes: int = 5
     minimum_storage_basin_area_m2: float = 50.0
     spill_channel_width_m: float = 1.0

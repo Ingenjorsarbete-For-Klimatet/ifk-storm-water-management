@@ -1,7 +1,7 @@
 """Synthetic-DEM tests for the depression storage / spill module.
 
 Set DEPRESSION_MODULE to the import path of the module, for example
-``export DEPRESSION_MODULE=storm_water_management.depression_storage``.
+``export DEPRESSION_MODULE=storm_water_management.basin_network``.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 mod = importlib.import_module(
-    os.environ.get("DEPRESSION_MODULE", "storm_water_management.depression_storage")
+    os.environ.get("DEPRESSION_MODULE", "storm_water_management.basin_network")
 )
 
 EPS = 1e-6
@@ -44,11 +44,9 @@ def condition_dem(dem: np.ndarray, eps: float = EPS) -> np.ndarray:
     return filled
 
 
-def d8_inputs(dem: np.ndarray):
-    """Return depth, D8 pointer and accumulation (in cells) for a DEM."""
-    h, w = dem.shape
-    filled = condition_dem(dem)
-    depth = (filled - dem).astype(np.float32)
+def pointer_and_accumulation(filled: np.ndarray):
+    """Steepest-descent D8 pointer and accumulation (in cells) on a drained surface."""
+    h, w = filled.shape
     pointer = np.zeros((h, w), dtype=np.float32)
     downstream = {}
     for r in range(h):
@@ -67,7 +65,34 @@ def d8_inputs(dem: np.ndarray):
     for r, c in sorted(downstream, key=lambda rc: -filled[rc]):
         rr, cc = downstream[(r, c)]
         acc[rr, cc] += acc[r, c]
-    return depth, pointer, acc.astype(np.float32)
+    return pointer, acc.astype(np.float32)
+
+
+def d8_inputs(dem: np.ndarray):
+    """Return depth, D8 pointer and accumulation (in cells) for a DEM."""
+    filled = condition_dem(dem)
+    depth = (filled - dem).astype(np.float32)
+    pointer, acc = pointer_and_accumulation(filled)
+    return depth, pointer, acc
+
+
+def pipeline_like_inputs(dem: np.ndarray, flat_increment: float = 1e-3):
+    """Like the real pipeline: exact fill for depth, gradient fill for D8."""
+    exact = condition_dem(dem, 0.0)
+    gradient = condition_dem(dem, flat_increment)
+    pointer, acc = pointer_and_accumulation(gradient)
+    return (exact - dem).astype(np.float32), pointer, acc
+
+
+def noisy_plateau_terrain(seed: int, h: int = 80, w: int = 110, amp: float = 0.5):
+    """Smooth random terrain, quantised so that natural flats (plateaus) occur."""
+    from scipy import ndimage
+
+    rng = np.random.default_rng(seed)
+    noise = ndimage.gaussian_filter(rng.normal(size=(h, w)), 5)
+    noise = noise / noise.std() * amp
+    z = 10 - 0.004 * np.arange(w) + noise
+    return (np.round(z / 0.02) * 0.02).astype(np.float32)
 
 
 def tilted_plane(h=30, w=40, slope=0.2, top=10.0):
@@ -294,31 +319,6 @@ def test_deterministic_output():
     assert a == b
 
 
-def test_downstream_trace_stops_on_cycle_and_border():
-    """The downstream trace reports cycles, missing flow and the raster edge."""
-    labels = np.zeros((5, 5), dtype=np.int32)
-    valid = np.ones((5, 5), dtype=bool)
-    pointer = np.zeros((5, 5), dtype=np.float32)
-    pointer[2, 2] = 2  # east
-    pointer[2, 3] = 32  # west -> two-cell loop
-    start = 2 * 5 + 2
-    assert mod._downstream_basin(start, 1, labels, pointer, valid, 100) == (
-        0,
-        mod.TRACE_CYCLE,
-    )
-    pointer[2, 3] = 0  # interior cell without flow direction
-    assert mod._downstream_basin(start, 1, labels, pointer, valid, 100) == (
-        0,
-        mod.TRACE_NO_FLOW,
-    )
-    pointer[2, 3] = 2  # flows on to the border cell, which has no direction
-    pointer[2, 4] = 0
-    assert mod._downstream_basin(start, 1, labels, pointer, valid, 100) == (
-        0,
-        mod.TRACE_EDGE,
-    )
-
-
 def test_empty_result_when_no_basins():
     """A DEM without depressions yields no basins and a zero depth raster."""
     dem = tilted_plane().astype(np.float32)
@@ -407,3 +407,152 @@ def test_network_outputs_header_only_when_no_basins(tmp_path):
     assert rows == []
     with (tmp_path / "summary.csv").open(newline="") as handle:
         assert csv.DictReader(handle).fieldnames == mod.NETWORK_FIELDS
+
+
+# ------------------------------------- pipeline-like terrain with plateaus
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_outlets_consistent_on_plateau_terrain(seed):
+    """Plateau terrain keeps every outlet on its basin's real exit."""
+    dem = noisy_plateau_terrain(seed)
+    depth, pointer, acc = pipeline_like_inputs(dem)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no dropped links, no unresolved paths
+        _, recs = mod.prepare_basin_network(
+            dem, depth, pointer, acc, 1.0, minimum_basin_area_m2=4.0
+        )
+    assert len(recs) >= 5
+    for rec in recs:
+        # All water of a basin leaves through its real exit.
+        assert rec["contributing_area_m2"] >= rec["depression_area_m2"] - 1e-6
+        assert rec["status"] in {mod.STATUS_OUT, mod.STATUS_TO_BASIN}
+
+
+# ------------------------------------------------------- outlet tie-breaking
+def flat_tie_puddle_arrays(main_channel_acc=100.0, side_arm_acc=2.0, upstream_acc=50.0):
+    """A puddle in a flat channel whose conditioned exit crosses a higher rim.
+
+    The exact-fill spill level ties between the main channel (large
+    accumulation) and a dead side arm (small accumulation), and the pointer
+    exits over a rim above the spill level, so no crossing at the spill is
+    pointer-followed. This mirrors the enkoping rasters, where the old
+    lowest-index tie-break put the outlet on the side arm.
+    """
+    dem = np.full((7, 9), 12.0, dtype=np.float32)
+    depth = np.zeros_like(dem)
+    pointer = np.zeros_like(dem)
+    acc = np.ones_like(dem)
+
+    # Flat channel along row 3 flowing east; the puddle sits in it.
+    dem[3, 1:6] = 10.0
+    dem[3, 6] = 10.5  # rim the conditioned flow crosses
+    dem[3, 7] = 10.0
+    dem[3, 4], dem[3, 5] = 9.0, 9.0
+    depth[3, 4], depth[3, 5] = 1.0, 1.0
+    # Shallow arm of the same depression, ending at an unfilled flat.
+    dem[2, 5], dem[1, 5] = 9.9, 9.9
+    depth[2, 5], depth[1, 5] = 0.1, 0.1
+    dem[0, 5] = 10.0
+    # Upstream basin in the same channel.
+    dem[3, 1], dem[4, 1] = 9.0, 9.0
+    depth[3, 1], depth[4, 1] = 1.0, 1.0
+
+    # Conditioned flow: west to east along row 3, over the rim at (3, 6).
+    pointer[3, 1:8] = 2
+    pointer[4, 1] = 128  # north, into the upstream pit
+    pointer[1, 5] = 8  # south, into the arm
+    pointer[2, 5] = 8  # south, into the puddle
+
+    acc[3, 1] = upstream_acc  # upstream outlet
+    acc[3, 4] = main_channel_acc  # puddle's main-channel crossing
+    acc[1, 5] = side_arm_acc  # puddle's side-arm crossing
+    return dem, depth, pointer, acc
+
+
+def test_flat_tie_outlet_prefers_the_main_flow_crossing():
+    """A flat-tie spill picks the crossing that carries the main flow."""
+    dem, depth, pointer, acc = flat_tie_puddle_arrays()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # a mis-picked outlet drops the link
+        _, recs = mod.prepare_basin_network(
+            dem, depth, pointer, acc, 1.0, minimum_basin_area_m2=1.0
+        )
+    assert len(recs) == 2
+    puddle = next(r for r in recs if r["cell_count"] == 4)
+    upstream = next(r for r in recs if r["cell_count"] == 2)
+    # The outlet is the main-channel crossing, not the side arm.
+    assert (puddle["outlet_row"], puddle["outlet_col"]) == (3, 4)
+    assert puddle["contributing_area_m2"] == pytest.approx(100.0)
+    # The upstream link survives the outlet-area check.
+    assert upstream["status"] == mod.STATUS_TO_BASIN
+    assert upstream["downstream_basin_id"] == puddle["basin_id"]
+
+
+def test_receiver_with_clearly_less_area_is_still_dropped():
+    """A receiver with clearly less outlet area still drops the link."""
+    dem, depth, pointer, acc = flat_tie_puddle_arrays(
+        main_channel_acc=50.0, upstream_acc=100.0
+    )
+    with pytest.warns(RuntimeWarning, match="dropped"):
+        _, recs = mod.prepare_basin_network(
+            dem, depth, pointer, acc, 1.0, minimum_basin_area_m2=1.0
+        )
+    upstream = next(r for r in recs if r["cell_count"] == 2)
+    assert upstream["status"] == mod.STATUS_DROPPED
+    assert upstream["downstream_basin_id"] == 0
+    assert upstream["dropped_receiver_id"] != 0
+
+
+def test_equal_outlet_area_link_is_kept_and_routed():
+    """float32 accumulation ties must not drop or mis-order a genuine link."""
+    dem = cascade_dem()[:, ::-1].copy()  # downstream basin gets the lower id
+    depth, pointer, acc = d8_inputs(dem)
+    _, net = mod.prepare_basin_network(
+        dem, depth, pointer, acc, 1.0, minimum_basin_area_m2=1.0
+    )
+    linked = [r for r in net if r["downstream_basin_id"] != 0]
+    assert len(linked) == 1
+    up = linked[0]
+    down = next(r for r in net if r["basin_id"] == up["downstream_basin_id"])
+    # float32 accumulation identical at both outlets (quantisation tie).
+    acc[up["outlet_row"], up["outlet_col"]] = 2e7
+    acc[down["outlet_row"], down["outlet_col"]] = 2e7
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _, _, sim = mod.simulate_basin_storage_spill(
+            dem, depth, pointer, acc, 1.0, 0.05, minimum_basin_area_m2=1.0
+        )
+    up_s = next(r for r in sim if r["basin_id"] == up["basin_id"])
+    down_s = next(r for r in sim if r["basin_id"] == down["basin_id"])
+    assert up_s["status"] == mod.STATUS_TO_BASIN
+    assert up_s["downstream_basin_id"] == down["basin_id"]
+    assert down_s["incoming_volume_m3"] == pytest.approx(
+        down_s["local_event_runoff_m3"] + up_s["spill_volume_m3"]
+    )
+    runoff = sum(r["local_event_runoff_m3"] for r in sim)
+    retained = sum(r["retained_volume_m3"] for r in sim)
+    exported = sum(r["spill_volume_m3"] for r in sim if r["downstream_basin_id"] == 0)
+    assert runoff == pytest.approx(retained + exported)
+
+
+def test_break_parent_cycles_drops_weakest_link():
+    """Cycle breaking drops the link of the smallest-area member."""
+    parent = np.array([0, 2, 3, 1, 0], dtype=np.int32)  # 1 -> 2 -> 3 -> 1
+    outlet_area = np.array([0.0, 5.0, 3.0, 4.0, 1.0])
+    dropped = np.zeros(5, dtype=bool)
+    dropped_receiver = np.zeros(5, dtype=np.int32)
+    broken = mod._break_parent_cycles(parent, outlet_area, dropped, dropped_receiver)
+    assert broken == 1
+    assert parent.tolist() == [0, 2, 0, 1, 0]  # weakest member (area 3) cut
+    assert dropped[2] and dropped_receiver[2] == 3
+    assert not dropped[[1, 3, 4]].any()
+
+
+def test_topological_order_places_sender_before_receiver():
+    """The topological order processes every sender before its receiver."""
+    parent = np.array([0, 0, 1, 1, 2], dtype=np.int32)  # 2 -> 1, 3 -> 1, 4 -> 2
+    order = mod._topological_order(parent).tolist()
+    assert sorted(order) == [1, 2, 3, 4]
+    position = {basin: i for i, basin in enumerate(order)}
+    assert position[2] < position[1]
+    assert position[3] < position[1]
+    assert position[4] < position[2]
