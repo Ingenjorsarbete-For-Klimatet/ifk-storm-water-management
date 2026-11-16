@@ -7,7 +7,7 @@ unresolved. It also writes a CSV of problem basins with map coordinates for QGIS
 
 Example (from the repository root):
 
-    python diagnose_basin_network.py --results-dir results/enkoping --prefix enkoping
+    python -m storm_water_management.diagnose_basin_network --results-dir results/enkoping --prefix enkoping
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--results-dir", type=Path, required=True)
     parser.add_argument("--prefix", required=True)
-    parser.add_argument("--module", default="storm_water_management.storm_scenario")
+    parser.add_argument("--module", default="storm_water_management.basin_network")
     parser.add_argument(
         "--min-depth",
         type=float,
@@ -79,6 +79,12 @@ def main() -> None:
     args = parser.parse_args()
 
     mod = importlib.import_module(args.module)
+    print(f"Module: {mod.__file__} (version {getattr(mod, 'MODULE_VERSION', 'old')})")
+    if getattr(mod, "MODULE_VERSION", 0) < 3:
+        raise SystemExit(
+            "The imported module is an old copy. Copy the new basin_network.py "
+            f"over {mod.__file__} (or fix PYTHONPATH so the right file is imported)."
+        )
     config_defaults = _config_defaults(args.module)
     min_depth = (
         args.min_depth
