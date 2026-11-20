@@ -6,21 +6,20 @@ SWMM simulations using elevation rasters.
 ## Elevation data
 
 Elevation tiles can be downloaded from Lantmäteriet with
-`storm_water_management.elevation_download.download_elevation_tiles()`. Configure
-the location and area with `DownloadConfig` from
+`storm_water_management.elevation_download.download_elevation_tiles()`.
+Configure the location and area with `DownloadConfig` from
 `storm_water_management.config`. Supply a location name and either a WGS84
-bounding box or center coordinates. Set
-`LANTMATERIET_USER` and `LANTMATERIET_PASSWORD` in the environment when required
-by the data service.
+bounding box or center coordinates. Set `LANTMATERIET_USER` and
+`LANTMATERIET_PASSWORD` in the environment when required by the data service.
 
 ## Terrain analysis
 
 `AnalysisConfig` and `PySwmmConfig` are defined in
 [config.py](../src/storm_water_management/config.py). The
 `run_terrain_analysis()` function is defined in
-[terrain_analysis.py](../src/storm_water_management/terrain_analysis.py). Supply the
-input/output directories, center coordinates, and an output prefix explicitly;
-the package does not choose a geographic location:
+[terrain_analysis.py](../src/storm_water_management/terrain_analysis.py).
+Supply the input/output directories, center coordinates, and an output prefix
+explicitly; the package does not choose a geographic location:
 
 ```python
 from pathlib import Path
@@ -62,11 +61,12 @@ from pathlib import Path
 from storm_water_management.config import PySwmmConfig
 from storm_water_management.pyswmm_model import run_pyswmm_analysis
 
+results = Path("results/terrain")
 run_pyswmm_analysis(
     PySwmmConfig(effective_rainfall_mm=100, duration_hours=6),
-    basin_summary_path=Path("results/terrain/study_area_buffered_basin_summary.csv"),
-    dem_path=Path("results/terrain/study_area_buffered_dem.tif"),
-    basin_ids_path=Path("results/terrain/study_area_buffered_depression_basin_id.tif"),
+    basin_summary_path=results / "study_area_buffered_basin_summary.csv",
+    dem_path=results / "study_area_buffered_dem.tif",
+    basin_ids_path=results / "study_area_buffered_depression_basin_id.tif",
     output_dir=Path("results/swmm"),
 )
 ```
