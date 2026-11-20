@@ -229,31 +229,31 @@ def main() -> None:
         print("receiver area (m2):", _quantiles(receiver_area))
         reasons_dropped = Counter(net.trace_reason[b] for b in dropped)
         print("trace end reasons of dropped:", dict(reasons_dropped))
-        for b, r in zip(dropped, receivers, strict=True):
-            ox, oy = _xy(data.transform, int(net.inside_outlet[b]), width)
-            rx, ry = _xy(data.transform, int(net.inside_outlet[r]), width)
+        for sender, receiver in zip(dropped, receivers, strict=True):
+            ox, oy = _xy(data.transform, int(net.inside_outlet[sender]), width)
+            rx, ry = _xy(data.transform, int(net.inside_outlet[receiver]), width)
             problems.append(
                 dict(
-                    basin_id=int(b),
+                    basin_id=int(sender),
                     kind="dropped",
-                    reason=net.trace_reason[b],
-                    cell_count=int(net.counts[b]),
+                    reason=net.trace_reason[sender],
+                    cell_count=int(net.counts[sender]),
                     outlet_x=ox,
                     outlet_y=oy,
                     end_x=rx,
                     end_y=ry,
-                    steps=int(net.trace_steps[b]),
-                    sender_area_m2=float(net.outlet_area[b]),
-                    receiver_id=int(r),
-                    receiver_area_m2=float(net.outlet_area[r]),
+                    steps=int(net.trace_steps[sender]),
+                    sender_area_m2=float(net.outlet_area[sender]),
+                    receiver_id=int(receiver),
+                    receiver_area_m2=float(net.outlet_area[receiver]),
                 )
             )
         print("examples (largest sender area first):")
-        for b in dropped[np.argsort(-net.outlet_area[dropped])][: args.samples]:
+        for sender in dropped[np.argsort(-net.outlet_area[dropped])][: args.samples]:
             row = next(
                 p
                 for p in problems
-                if p["basin_id"] == int(b) and p["kind"] == "dropped"
+                if p["basin_id"] == int(sender) and p["kind"] == "dropped"
             )
             print(
                 "  ",

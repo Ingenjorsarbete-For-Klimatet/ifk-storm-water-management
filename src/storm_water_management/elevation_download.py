@@ -186,7 +186,7 @@ def download_elevation_tiles(
     auth_header: str | None = None,
 ) -> list[Path]:
     """Find and download elevation tiles intersecting a WGS84 area."""
-    location_slug(name)
+    slug = location_slug(name)
     if bbox is None:
         if center_lon is None or center_lat is None:
             raise ValueError(
@@ -196,7 +196,7 @@ def download_elevation_tiles(
     else:
         selected_bbox = bbox
     validate_bbox(selected_bbox)
-    destination_dir = output_dir or DEFAULT_OUTPUT_ROOT / location_slug(name)
+    destination_dir = output_dir or DEFAULT_OUTPUT_ROOT / slug
     authorization = auth_header or make_auth_header()
     destination_dir.mkdir(parents=True, exist_ok=True)
 

@@ -92,7 +92,8 @@ def run_terrain_analysis(config: AnalysisConfig) -> None:
 
     effective_rain = 0.0
     scenario_tags: dict[str, str] = {}
-    if storm:
+    if config.rainfall_mm is not None:
+        rainfall_mm = config.rainfall_mm
         result_contributing_area = output_dir / f"{prefix}_contributing_area.tif"
         result_upslope_storage = output_dir / f"{prefix}_upslope_depression_storage.tif"
         buffered_ponding = output_dir / f"{prefix}_buffered_estimated_ponding_depth.tif"
@@ -104,13 +105,13 @@ def run_terrain_analysis(config: AnalysisConfig) -> None:
             else config.infiltration_fraction
         )
         effective_rain = effective_rainfall_m(
-            config.rainfall_mm,
+            rainfall_mm,
             infiltration_fraction=fraction,
             infiltration_capacity_mm_h=config.infiltration_capacity_mm_h,
             rainfall_duration_hours=config.rainfall_duration_hours,
         )
         scenario_tags = {
-            "rainfall_mm": f"{config.rainfall_mm:.9g}",
+            "rainfall_mm": f"{rainfall_mm:.9g}",
             "infiltration_fraction": (
                 "n/a"
                 if config.infiltration_capacity_mm_h is not None
@@ -129,13 +130,13 @@ def run_terrain_analysis(config: AnalysisConfig) -> None:
         }
         if config.infiltration_capacity_mm_h is None:
             print(
-                f"Storm rainfall: {config.rainfall_mm:g} mm; assuming "
+                f"Storm rainfall: {rainfall_mm:g} mm; assuming "
                 f"{fraction:.0%} uniform infiltration, leaving "
                 f"{effective_rain * 1000:g} mm effective rainfall."
             )
         else:
             print(
-                f"Storm rainfall: {config.rainfall_mm:g} mm over "
+                f"Storm rainfall: {rainfall_mm:g} mm over "
                 f"{config.rainfall_duration_hours:g} h; constant infiltration "
                 f"capacity {config.infiltration_capacity_mm_h:g} mm/h leaves "
                 f"{effective_rain * 1000:g} mm effective rainfall."

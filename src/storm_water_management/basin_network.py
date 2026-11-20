@@ -921,14 +921,12 @@ def simulate_basin_storage_spill(
     summaries: list[BasinRecord] = []
     for basin_id in range(1, n + 1):
         record = _network_record(net, basin_id)
-        record.update(
-            local_event_runoff_m3=float(local_volume[basin_id]),
-            incoming_volume_m3=float(incoming[basin_id]),
-            retained_volume_m3=float(retained[basin_id]),
-            spill_volume_m3=float(spill_volume[basin_id]),
-            water_level_m=float(water_levels[basin_id]),
-            effective_rainfall_m=float(effective_rain_m),
-        )
+        record["local_event_runoff_m3"] = float(local_volume[basin_id])
+        record["incoming_volume_m3"] = float(incoming[basin_id])
+        record["retained_volume_m3"] = float(retained[basin_id])
+        record["spill_volume_m3"] = float(spill_volume[basin_id])
+        record["water_level_m"] = float(water_levels[basin_id])
+        record["effective_rainfall_m"] = float(effective_rain_m)
         summaries.append(record)
     return net.labels, depths, summaries
 

@@ -480,14 +480,11 @@ def render_swmm_input(
         )
         if basin.downstream_basin_id:
             receiver = basin_by_id[basin.downstream_basin_id]
-            if all(
-                value is not None
-                for value in (
-                    basin.outlet_x,
-                    basin.outlet_y,
-                    receiver.outlet_x,
-                    receiver.outlet_y,
-                )
+            if (
+                basin.outlet_x is not None
+                and basin.outlet_y is not None
+                and receiver.outlet_x is not None
+                and receiver.outlet_y is not None
             ):
                 channel_length_m = math.hypot(
                     receiver.outlet_x - basin.outlet_x,

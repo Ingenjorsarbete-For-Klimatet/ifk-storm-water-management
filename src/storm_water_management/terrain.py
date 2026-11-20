@@ -151,7 +151,12 @@ def run_depression_analysis(
     exact_fill = environment.fill_depressions_wang_and_liu(dem, fix_flats=False)
     depth = environment.raster_calculator("('dem_no_deps'-'dem')", [exact_fill, dem])
     environment.write_raster(depth, output_path.name)
-    if all(path is not None for path in requested_outputs):
+    if (
+        contributing_area_path is not None
+        and upslope_storage_path is not None
+        and d8_pointer_path is not None
+        and d8_contributing_area_path is not None
+    ):
         # Filling with flat increment only for D8-flow.
         filled_dem = environment.fill_depressions_wang_and_liu(
             dem, flat_increment=WANG_LIU_FLAT_INCREMENT_M
