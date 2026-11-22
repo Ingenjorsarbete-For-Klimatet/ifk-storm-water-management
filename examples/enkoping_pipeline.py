@@ -136,6 +136,12 @@ def run_pipeline(
             / f"{output_prefix}_buffered_depression_basin_id.tif",
             output_dir=output_dir / "pyswmm",
         )
+        water_depth_raster = output_dir / "pyswmm" / "pyswmm_water_depth.tif"
+        write_depth_class_polygons(water_depth_raster, output_format="FlatGeobuf")
+        polygon_path = water_depth_raster.with_name(
+            f"{water_depth_raster.stem}_polygons.fgb"
+        )
+        print(f"FlatGeobuf polygons: {polygon_path}")
     if not plot:
         return
 

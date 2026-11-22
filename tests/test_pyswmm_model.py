@@ -1,7 +1,13 @@
 """Tests for PySWMM inputs from prepared or static basin summaries."""
 
+import geopandas as gpd
+import numpy as np
+import pandas as pd
 import pytest
+import rasterio
+from rasterio.transform import from_origin
 
+from storm_water_management.depth_polygons import write_depth_class_polygons
 from storm_water_management.pyswmm_model import (
     Basin,
     BasinGeometry,
@@ -9,6 +15,7 @@ from storm_water_management.pyswmm_model import (
     render_swmm_input,
     select_storage_basins,
     spill_channel_width_for_basin,
+    write_water_depth_raster,
 )
 
 NETWORK_COLUMNS = (
@@ -174,3 +181,92 @@ def test_rendered_xsections_use_per_basin_width():
 
     assert float(small_line.split()[3]) == pytest.approx(1.0)
     assert float(large_line.split()[3]) == pytest.approx(10.0)
+
+
+def _write_snapshot_inputs(tmp_path):
+    """Write a bowl DEM, a basin-ID raster and a three-step node series."""
+    transform = from_origin(0, 3, 1, 1)
+    labels = np.array([[1, 1, 1], [1, 1, 1], [1, 1, 0]], dtype=np.int32)
+    dem = np.array(
+        [[2.0, 2.0, 2.0], [2.0, 1.0, 2.0], [2.0, 2.0, 2.0]], dtype=np.float32
+    )
+    labels_path = tmp_path / "basin_ids.tif"
+    dem_path = tmp_path / "dem.tif"
+    for path, data in ((labels_path, labels), (dem_path, dem)):
+        with rasterio.open(
+            path,
+            "w",
+            driver="GTiff",
+            height=3,
+            width=3,
+            count=1,
+            dtype=data.dtype,
+            crs="EPSG:3006",
+            transform=transform,
+        ) as dst:
+            dst.write(data, 1)
+    node_path = tmp_path / "node_timeseries.csv"
+    pd.DataFrame(
+        {
+            "datetime": [
+                "2025-01-01 00:05:00",
+                "2025-01-01 00:10:00",
+                "2025-01-01 00:15:00",
+            ],
+            "basin_id": [1, 1, 1],
+            "water_level_m": [1.2, 1.5, 1.3],
+            "stored_volume_m3": [10.0, 100.0, 50.0],
+        }
+    ).to_csv(node_path, index=False)
+    return node_path, dem_path, labels_path
+
+
+def test_write_water_depth_raster_defaults_to_peak_storage(tmp_path):
+    """The raster maps per-cell depth at the moment of peak stored volume."""
+    node_path, dem_path, labels_path = _write_snapshot_inputs(tmp_path)
+    output_path = tmp_path / "water_depth.tif"
+
+    result = write_water_depth_raster(node_path, dem_path, labels_path, output_path)
+
+    assert result == output_path
+    with rasterio.open(output_path) as source:
+        depth = source.read(1)
+        assert source.crs is not None
+    assert depth[1, 1] == pytest.approx(0.5)
+    assert depth[0, 0] == 0.0
+    assert depth[2, 2] == -9999.0
+
+
+def test_write_water_depth_raster_requested_time(tmp_path):
+    """An explicit snapshot time selects that step's water level."""
+    node_path, dem_path, labels_path = _write_snapshot_inputs(tmp_path)
+    output_path = tmp_path / "water_depth.tif"
+
+    write_water_depth_raster(
+        node_path,
+        dem_path,
+        labels_path,
+        output_path,
+        depth_time="2025-01-01 00:15:00",
+    )
+
+    with rasterio.open(output_path) as source:
+        depth = source.read(1)
+    assert depth[1, 1] == pytest.approx(0.3)
+
+
+def test_write_water_depth_raster_feeds_flatgeobuf_export(tmp_path):
+    """The pipeline's depth-class polygon export works on the snapshot raster."""
+    node_path, dem_path, labels_path = _write_snapshot_inputs(tmp_path)
+    output_path = tmp_path / "water_depth.tif"
+    write_water_depth_raster(node_path, dem_path, labels_path, output_path)
+
+    write_depth_class_polygons(output_path, output_format="FlatGeobuf")
+
+    polygons_path = output_path.with_name("water_depth_polygons.fgb")
+    assert polygons_path.exists()
+    gdf = gpd.read_file(polygons_path)
+    assert not gdf.empty
+    assert set(gdf["depth_class"]).issubset(
+        {"0.1-0.2 m", "0.2-0.5 m", "0.5-1 m", "1 <"}
+    )

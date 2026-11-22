@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import geopandas as gpd
@@ -16,6 +17,8 @@ import pandas as pd
 import rasterio
 from matplotlib.colors import BoundaryNorm, ListedColormap, LogNorm, Normalize
 from rasterio.enums import Resampling
+
+from storm_water_management.pyswmm_model import resolve_snapshot_time
 
 DEPTH_LIMITS_M = (0.1, 0.2, 0.5, 1.0, float("inf"))
 DEPTH_LABELS = ("0.1–0.2 m", "0.2–0.5 m", "0.5–1 m", ">1 m")
@@ -311,6 +314,61 @@ def _read_dem_backdrop(
     return image, extent
 
 
+def _display_window(
+    source: rasterio.io.DatasetReader,
+    crs: object,
+    bounds: tuple[float, float, float, float],
+    max_pixels: int,
+    label: str,
+) -> (
+    tuple[
+        rasterio.windows.Window,
+        tuple[int, int],
+        tuple[float, float, float, float],
+        tuple[float, float, float, float],
+    ]
+    | None
+):
+    """Clip bounds to the raster; return window, display shape, extent, bounds."""
+    if source.crs != crs:
+        raise ValueError(
+            f"{label} CRS ({source.crs}) does not match basin CRS ({crs})."
+        )
+    left, bottom = (
+        max(bounds[0], source.bounds.left),
+        max(bounds[1], source.bounds.bottom),
+    )
+    right, top = (
+        min(bounds[2], source.bounds.right),
+        min(bounds[3], source.bounds.top),
+    )
+    if left >= right or bottom >= top:
+        return None
+    window = (
+        rasterio.windows.from_bounds(
+            left, bottom, right, top, transform=source.transform
+        )
+        .round_offsets()
+        .round_lengths()
+    )
+    window = window.intersection(
+        rasterio.windows.Window(0, 0, source.width, source.height)
+    )
+    scale = min(1, max_pixels / max(window.width, window.height))
+    shape = (
+        max(1, round(window.height * scale)),
+        max(1, round(window.width * scale)),
+    )
+    transform = source.window_transform(window)
+    extent = (
+        transform.c,
+        transform.c + transform.a * window.width,
+        transform.f + transform.e * window.height,
+        transform.f,
+    )
+    return window, shape, extent, (left, bottom, right, top)
+
+
 def _read_basin_depth_layer(
     path: Path,
     crs: object,
@@ -322,63 +380,76 @@ def _read_basin_depth_layer(
     if not path.is_file():
         return None
     with rasterio.open(path) as source:
-        if source.crs != crs:
-            raise ValueError(
-                f"Basin-ID CRS ({source.crs}) does not match basin CRS ({crs})."
-            )
-        left, bottom = (
-            max(bounds[0], source.bounds.left),
-            max(bounds[1], source.bounds.bottom),
-        )
-        right, top = (
-            min(bounds[2], source.bounds.right),
-            min(bounds[3], source.bounds.top),
-        )
-        if left >= right or bottom >= top:
+        context = _display_window(source, crs, bounds, max_pixels, "Basin-ID")
+        if context is None:
             return None
-        window = (
-            rasterio.windows.from_bounds(
-                left, bottom, right, top, transform=source.transform
-            )
-            .round_offsets()
-            .round_lengths()
-        )
-        window = window.intersection(
-            rasterio.windows.Window(0, 0, source.width, source.height)
-        )
+        window, shape, extent, _clipped = context
         labels = source.read(
-            1,
-            window=window,
-            out_shape=(
-                max(
-                    1,
-                    round(
-                        window.height
-                        * min(1, max_pixels / max(window.width, window.height))
-                    ),
-                ),
-                max(
-                    1,
-                    round(
-                        window.width
-                        * min(1, max_pixels / max(window.width, window.height))
-                    ),
-                ),
-            ),
-            resampling=Resampling.mode,
-        )
-        transform = source.window_transform(window)
-        extent = (
-            transform.c,
-            transform.c + transform.a * window.width,
-            transform.f + transform.e * window.height,
-            transform.f,
+            1, window=window, out_shape=shape, resampling=Resampling.mode
         )
     lookup = np.full(max(max(basin_depths, default=0), int(labels.max())) + 1, np.nan)
     for basin_id, depth in basin_depths.items():
         if 0 <= basin_id < lookup.size:
             lookup[basin_id] = depth
     return np.ma.masked_invalid(lookup[labels]), extent
+
+
+def _read_basin_water_depth_layer(
+    basin_ids_path: Path,
+    dem_path: Path,
+    crs: object,
+    bounds: tuple[float, float, float, float],
+    water_levels: dict[int, float],
+    max_pixels: int,
+) -> tuple[np.ma.MaskedArray, tuple[float, float, float, float]] | None:
+    """Per-cell water depth: modeled water level minus ground elevation.
+
+    Each basin cell gets ``water_level - DEM`` where the ground lies below the
+    modeled level, so basin fringes are shallower than their low centres and
+    cells above the water level stay dry (masked). Returns None when either
+    raster is missing or the DEM does not cover the map bounds, so callers can
+    fall back to uniform per-basin depths.
+    """
+    if not basin_ids_path.is_file() or not dem_path.is_file():
+        return None
+    with rasterio.open(basin_ids_path) as source:
+        context = _display_window(source, crs, bounds, max_pixels, "Basin-ID")
+        if context is None:
+            return None
+        window, shape, extent, clipped = context
+        labels = source.read(
+            1, window=window, out_shape=shape, resampling=Resampling.mode
+        )
+    left, bottom, right, top = clipped
+    with rasterio.open(dem_path) as dem_source:
+        if dem_source.crs != crs:
+            raise ValueError(
+                f"DEM CRS ({dem_source.crs}) does not match basin CRS ({crs})."
+            )
+        if (
+            dem_source.bounds.left > left
+            or dem_source.bounds.bottom > bottom
+            or dem_source.bounds.right < right
+            or dem_source.bounds.top < top
+        ):
+            return None
+        dem_window = (
+            rasterio.windows.from_bounds(
+                left, bottom, right, top, transform=dem_source.transform
+            )
+            .round_offsets()
+            .round_lengths()
+        )
+        ground = dem_source.read(
+            1, window=dem_window, out_shape=shape, masked=True
+        ).filled(np.nan)
+    lookup = np.full(max(max(water_levels, default=0), int(labels.max())) + 1, np.nan)
+    for basin_id, level in water_levels.items():
+        if 0 <= basin_id < lookup.size:
+            lookup[basin_id] = level
+    surface = lookup[labels]
+    depth = np.where(surface > ground, surface - ground, np.nan)
+    return np.ma.masked_invalid(depth), extent
 
 
 def create_pyswmm_plot(
@@ -392,8 +463,17 @@ def create_pyswmm_plot(
     output_path: Path,
     max_display_pixels: int = 1400,
     minimum_flow_m3s: float = 0.005,
+    depth_time: str | datetime | None = None,
 ) -> None:
-    """Plot PySWMM basin peaks, spill links, aggregate hydrographs and storage."""
+    """Plot PySWMM water depths, spill links, aggregate hydrographs and storage.
+
+    The depth map shows the modeled water depth per basin cell (water level
+    minus ground elevation) at ``depth_time``, snapped to the nearest reported
+    timestep, so basin fringes are shallower than their low centres. Without a
+    DEM or basin-ID raster it falls back to one uniform depth per basin. The
+    default snapshot is the moment of maximum total stored volume; the
+    scenario-wide peak depth stays in the figure title.
+    """
     if not peaks_path.is_file():
         raise FileNotFoundError(f"PySWMM peak GeoPackage not found: {peaks_path}")
     for path in (node_path, link_path, summary_path):
@@ -408,7 +488,13 @@ def create_pyswmm_plot(
     required = {"basin_id", "max_depth_m", "max_spill_flow_m3s", "geometry"}
     if missing := required.difference(peaks.columns):
         raise ValueError(f"Peak data lacks columns: {', '.join(sorted(missing))}")
-    if not {"datetime", "stored_volume_m3", "flooding_rate_m3s"}.issubset(nodes):
+    if not {
+        "datetime",
+        "stored_volume_m3",
+        "flooding_rate_m3s",
+        "depth_m",
+        "water_level_m",
+    }.issubset(nodes):
         raise ValueError("Node time series is missing required columns.")
     if not {"datetime", "basin_id", "flow_m3s"}.issubset(links):
         raise ValueError("Link time series is missing required columns.")
@@ -440,16 +526,38 @@ def create_pyswmm_plot(
         bounds[2] + margin_x,
         bounds[3] + margin_y,
     )
+    chosen_time = resolve_snapshot_time(nodes, depth_time)
+    snapshot_rows = nodes.loc[nodes.datetime == chosen_time].set_index("basin_id")
+    snapshot_depths = (
+        pd.to_numeric(snapshot_rows["depth_m"], errors="coerce")
+        .reindex(peaks.basin_id.astype(int))
+        .to_numpy(dtype=float)
+    )
+    snapshot_levels = pd.to_numeric(
+        snapshot_rows["water_level_m"], errors="coerce"
+    ).reindex(peaks.basin_id.astype(int))
     dem_layer = _read_dem_backdrop(dem_path, peaks.crs, map_bounds, max_display_pixels)
-    basin_depths = dict(
-        zip(peaks.basin_id.astype(int), peaks.max_depth_m.astype(float), strict=True)
+    basin_depths = dict(zip(peaks.basin_id.astype(int), snapshot_depths, strict=True))
+    basin_water_levels = {
+        int(basin_id): float(level)
+        for basin_id, level in snapshot_levels.items()
+        if pd.notna(level)
+    }
+    depth_layer = _read_basin_water_depth_layer(
+        basin_ids_path,
+        dem_path,
+        peaks.crs,
+        map_bounds,
+        basin_water_levels,
+        max_display_pixels,
     )
-    depth_layer = _read_basin_depth_layer(
-        basin_ids_path, peaks.crs, map_bounds, basin_depths, max_display_pixels
-    )
+    if depth_layer is None:
+        depth_layer = _read_basin_depth_layer(
+            basin_ids_path, peaks.crs, map_bounds, basin_depths, max_display_pixels
+        )
     fig, axes = plt.subplots(2, 2, figsize=(15, 10), constrained_layout=True)
     depth_ax, flow_ax, hydro_ax, storage_ax = axes.ravel()
-    depths = pd.to_numeric(peaks.max_depth_m, errors="coerce").to_numpy()
+    peak_depths = pd.to_numeric(peaks.max_depth_m, errors="coerce").to_numpy()
     if depth_layer is not None:
         basin_image, basin_extent = depth_layer
         points = depth_ax.imshow(
@@ -464,16 +572,16 @@ def create_pyswmm_plot(
         points = depth_ax.scatter(
             peaks.geometry.x,
             peaks.geometry.y,
-            c=_depth_classes(depths),
+            c=_depth_classes(snapshot_depths),
             s=18,
             cmap=DEPTH_CLASS_CMAP,
             norm=DEPTH_CLASS_NORM,
             edgecolors="none",
         )
-    depth_ax.set_title("Maximum modeled basin storage depth")
+    depth_ax.set_title(f"Modeled water depth at {chosen_time:%Y-%m-%d %H:%M}")
     bar = fig.colorbar(points, ax=depth_ax, ticks=np.arange(4))
     bar.ax.set_yticklabels(DEPTH_LABELS)
-    bar.set_label("Peak water depth (m)")
+    bar.set_label("Water depth (m)")
 
     flows = pd.to_numeric(peaks.max_spill_flow_m3s, errors="coerce").fillna(0)
     active = peaks.loc[(flows >= minimum_flow_m3s) & (flows > 0)].copy()
@@ -570,7 +678,7 @@ def create_pyswmm_plot(
         axis.grid(alpha=0.25)
     fig.suptitle(
         f"Conceptual PySWMM scenario — {len(peaks)} basins; "
-        f"peak depth {np.nanmax(depths):.2f} m",
+        f"peak depth {np.nanmax(peak_depths):.2f} m",
         fontsize=15,
         fontweight="bold",
     )
@@ -578,3 +686,4 @@ def create_pyswmm_plot(
     fig.savefig(output_path, dpi=180, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"PySWMM visualization written to {output_path}")
+    print(f"Depth map snapshot time: {chosen_time:%Y-%m-%d %H:%M}")

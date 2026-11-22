@@ -10,6 +10,7 @@ from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 import rasterio
 from pyswmm import Links, Nodes, Simulation
 
@@ -699,6 +700,98 @@ def run_model(
     return node_series_path, link_series_path, outfall_series_path, basin_summary_path
 
 
+def resolve_snapshot_time(
+    nodes: pd.DataFrame, depth_time: str | datetime | None
+) -> pd.Timestamp:
+    """Return the reported timestep to map: peak storage or nearest requested.
+
+    ``nodes`` must contain parsed ``datetime`` and ``stored_volume_m3``
+    columns. Without ``depth_time`` the moment of maximum total stored volume
+    is used; a requested time snaps to the nearest reported step.
+    """
+    timestamps = pd.DatetimeIndex(np.sort(nodes["datetime"].unique()))
+    if timestamps.empty:
+        raise ValueError("Node time series contains no timesteps.")
+    if depth_time is None:
+        return nodes.groupby("datetime")["stored_volume_m3"].sum().idxmax()
+    nearest = timestamps.get_indexer([pd.Timestamp(depth_time)], method="nearest")
+    return timestamps[nearest[0]]
+
+
+def write_water_depth_raster(
+    node_path: Path,
+    dem_path: Path,
+    basin_ids_path: Path,
+    output_path: Path,
+    depth_time: str | datetime | None = None,
+) -> Path:
+    """Write the modeled per-cell water depth at one snapshot time.
+
+    Inside modeled basins each cell gets ``water_level - ground elevation``
+    where the ground lies below the modeled level and zero where it lies
+    above (dry fringe); all other cells get NoData. The default snapshot is
+    the moment of peak total stored volume, matching the default depth map
+    of ``create_pyswmm_plot``.
+    """
+    nodes = pd.read_csv(node_path, parse_dates=["datetime"])
+    required = {"datetime", "basin_id", "water_level_m", "stored_volume_m3"}
+    if not required.issubset(nodes.columns):
+        raise ValueError("Node time series is missing required columns.")
+    chosen_time = resolve_snapshot_time(nodes, depth_time)
+    snapshot = nodes.loc[nodes["datetime"] == chosen_time]
+    water_levels = {
+        int(row.basin_id): float(row.water_level_m)
+        for row in snapshot.itertuples()
+        if pd.notna(row.water_level_m)
+    }
+    if not water_levels:
+        raise ValueError(f"No basin water levels at snapshot time {chosen_time}.")
+
+    with (
+        rasterio.open(basin_ids_path) as labels_src,
+        rasterio.open(dem_path) as dem_src,
+    ):
+        if (
+            labels_src.width != dem_src.width
+            or labels_src.height != dem_src.height
+            or labels_src.transform != dem_src.transform
+            or labels_src.crs != dem_src.crs
+        ):
+            raise ValueError(
+                "The DEM and basin-ID rasters must have identical grids and CRS."
+            )
+        raster_max = 0
+        for _, window in labels_src.block_windows(1):
+            raster_max = max(raster_max, int(labels_src.read(1, window=window).max()))
+        lookup = np.full(max(max(water_levels), raster_max) + 1, np.nan)
+        for basin_id, level in water_levels.items():
+            lookup[basin_id] = level
+
+        nodata = -9999.0
+        profile = labels_src.profile.copy()
+        profile.update(
+            driver="GTiff",
+            count=1,
+            dtype="float32",
+            nodata=nodata,
+            compress="lzw",
+            tiled=True,
+        )
+        profile.pop("blockxsize", None)
+        profile.pop("blockysize", None)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with rasterio.open(output_path, "w", **profile) as destination:
+            for _, window in labels_src.block_windows(1):
+                labels = labels_src.read(1, window=window)
+                ground = dem_src.read(1, window=window, masked=True).filled(np.nan)
+                surface = lookup[labels]
+                valid = np.isfinite(surface) & np.isfinite(ground)
+                depth = np.where(valid & (surface > ground), surface - ground, 0.0)
+                depth[~valid] = nodata
+                destination.write(depth.astype(np.float32), 1, window=window)
+    return output_path
+
+
 def _write_run_metadata(output_dir: Path, report_path: Path) -> None:
     """Extract SWMM report continuity percentages for quality checks."""
     report_lines = report_path.read_text(
@@ -914,6 +1007,9 @@ def run_pyswmm_analysis(
         config.report_interval_minutes,
         output_dir,
     )
+    depth_raster_path = write_water_depth_raster(
+        node_csv, dem_path, basin_ids_path, output_dir / "pyswmm_water_depth.tif"
+    )
     print(
         f"Ran {len(basins)} of {len(source_basins)} DEM-derived basins with "
         f"{rainfall_mm:g} mm effective rainfall; {external_runoff_area_m2:,.0f} m² "
@@ -924,4 +1020,5 @@ def run_pyswmm_analysis(
     print(f"Spill-link time series: {link_csv}")
     print(f"Outfall time series: {outfall_csv}")
     print(f"Basin summary: {basin_csv}")
+    print(f"Snapshot water-depth raster: {depth_raster_path}")
     print(f"Assumptions and capacity check: {output_dir / 'model_notes.txt'}")
