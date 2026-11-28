@@ -8,7 +8,9 @@ import rasterio
 from rasterio.transform import from_origin
 
 from storm_water_management.plotting import (
+    _any_downsample,
     _read_basin_water_depth_layer,
+    create_nodata_plot,
     create_pyswmm_plot,
     create_terrain_plot,
 )
@@ -250,3 +252,65 @@ def test_create_pyswmm_plot_water_depth_per_cell(tmp_path):
     )
 
     assert output_path.exists()
+
+
+def _write_nodata_dem(tmp_path):
+    """Write a 3x3 DEM with two declared-nodata cells and one NaN cell."""
+    dem_path = tmp_path / "dem.tif"
+    dem = np.array(
+        [[1.0, 2.0, -9999.0], [4.0, np.nan, 6.0], [-9999.0, 8.0, 9.0]],
+        dtype=np.float32,
+    )
+    with rasterio.open(
+        dem_path,
+        "w",
+        driver="GTiff",
+        height=3,
+        width=3,
+        count=1,
+        dtype="float32",
+        crs="EPSG:3006",
+        transform=from_origin(0, 3, 1, 1),
+        nodata=-9999.0,
+    ) as dst:
+        dst.write(dem, 1)
+    return dem_path
+
+
+def test_create_nodata_plot_counts_declared_and_nan_pixels(tmp_path, capsys):
+    """Declared nodata and NaN pixels are both counted and plotted."""
+    output_path = tmp_path / "nodata_plot.png"
+
+    create_nodata_plot(_write_nodata_dem(tmp_path), output_path)
+
+    assert output_path.exists()
+    out = capsys.readouterr().out
+    assert "Nodata value: -9999" in out
+    assert "3 of 9 pixels (33.33%) are nodata" in out
+
+
+def test_create_nodata_plot_downsamples_while_keeping_nodata_visible(tmp_path):
+    """Downsampling to fewer display pixels still renders a plot."""
+    output_path = tmp_path / "nodata_plot.png"
+
+    create_nodata_plot(_write_nodata_dem(tmp_path), output_path, max_display_pixels=2)
+
+    assert output_path.exists()
+
+
+def test_create_nodata_plot_requires_existing_raster(tmp_path):
+    """A missing DEM raises FileNotFoundError."""
+    with pytest.raises(FileNotFoundError):
+        create_nodata_plot(tmp_path / "missing.tif", tmp_path / "plot.png")
+
+
+def test_any_downsample_marks_cell_when_any_source_pixel_is_nodata():
+    """A display cell is True when at least one source pixel is True."""
+    mask = np.zeros((6, 6), dtype=bool)
+    mask[4, 5] = True
+
+    shrunk = _any_downsample(mask, (2, 2))
+
+    assert shrunk.shape == (2, 2)
+    assert shrunk.sum() == 1
+    assert shrunk[1, 1]

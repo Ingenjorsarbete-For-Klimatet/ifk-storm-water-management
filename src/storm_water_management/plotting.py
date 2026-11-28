@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 from matplotlib.colors import BoundaryNorm, ListedColormap, LogNorm, Normalize
+from matplotlib.patches import Patch
 from rasterio.enums import Resampling
 
 from storm_water_management.pyswmm_model import resolve_snapshot_time
@@ -687,3 +688,90 @@ def create_pyswmm_plot(
     plt.close(fig)
     print(f"PySWMM visualization written to {output_path}")
     print(f"Depth map snapshot time: {chosen_time:%Y-%m-%d %H:%M}")
+
+
+def _any_downsample(mask: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Shrink a boolean mask so a display cell is True when any source cell is."""
+    if mask.shape == shape:
+        return mask
+    row_edges = np.unique(
+        np.linspace(0, mask.shape[0], shape[0] + 1).round().astype(int)
+    )
+    column_edges = np.unique(
+        np.linspace(0, mask.shape[1], shape[1] + 1).round().astype(int)
+    )
+    counts = np.add.reduceat(
+        np.add.reduceat(mask.astype(np.uint32), row_edges[:-1], axis=0),
+        column_edges[:-1],
+        axis=1,
+    )
+    return counts > 0
+
+
+def create_nodata_plot(
+    dem_path: Path,
+    output_path: Path,
+    max_display_pixels: int = 1600,
+) -> None:
+    """Plot every nodata pixel of a DEM over a grayscale elevation backdrop.
+
+    Nodata pixels are the raster's declared nodata value, masked pixels, and
+    non-finite values in the first band. The red overlay downsamples with
+    "any" semantics so every nodata pixel stays visible at display
+    resolution, while the title and printed statistics use the exact
+    full-resolution count.
+    """
+    if not dem_path.is_file():
+        raise FileNotFoundError(f"DEM raster not found: {dem_path}")
+    with rasterio.open(dem_path) as source:
+        if source.crs is None:
+            raise ValueError("The DEM raster has no CRS.")
+        band = source.read(1, masked=True)
+        bounds, crs, nodata_value = source.bounds, source.crs, source.nodata
+        backdrop = _display_raster(source, max_display_pixels)
+    values = np.asarray(band.data)
+    nodata = np.ma.getmaskarray(band) | ~np.isfinite(values)
+    total = int(nodata.size)
+    nodata_count = int(nodata.sum())
+    display_nodata = _any_downsample(nodata, backdrop.shape)
+
+    extent = (bounds.left, bounds.right, bounds.bottom, bounds.top)
+    figure, axis = plt.subplots(figsize=(9, 8), constrained_layout=True)
+    elevations = backdrop.compressed()
+    if elevations.size:
+        low, high = np.percentile(elevations, (2, 98))
+        axis.imshow(
+            backdrop,
+            extent=extent,
+            origin="upper",
+            cmap="Greys",
+            norm=Normalize(float(low), float(high) if high > low else float(low) + 1),
+        )
+    axis.imshow(
+        display_nodata,
+        extent=extent,
+        origin="upper",
+        cmap=ListedColormap([(0, 0, 0, 0), (1, 0, 0, 1)]),
+        vmin=0,
+        vmax=1,
+        interpolation="nearest",
+    )
+    axis.set_title(
+        f"Nodata pixels: {nodata_count:,} of {total:,} ({nodata_count / total:.2%})"
+    )
+    axis.set_xlabel("Easting (m)")
+    axis.set_ylabel("Northing (m)")
+    axis.set_aspect("equal", adjustable="box")
+    axis.legend(
+        handles=[Patch(facecolor="red", label="Nodata pixel")], loc="upper right"
+    )
+    figure.suptitle(f"DEM nodata map — {crs}", fontsize=15, fontweight="bold")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, dpi=180, bbox_inches="tight", facecolor="white")
+    plt.close(figure)
+    nodata_repr = "not declared" if nodata_value is None else f"{nodata_value:g}"
+    print(f"Saved plot: {output_path}")
+    print(
+        f"Nodata value: {nodata_repr}; {nodata_count:,} of {total:,} pixels "
+        f"({nodata_count / total:.2%}) are nodata."
+    )

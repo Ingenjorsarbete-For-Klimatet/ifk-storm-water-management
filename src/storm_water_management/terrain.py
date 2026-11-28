@@ -98,12 +98,26 @@ def create_buffered_mosaic(
     analysis_bounds: tuple[float, float, float, float],
     output_path: Path,
 ) -> Path:
-    """Mosaic selected tiles, limited to the buffered calculation bounds."""
+    """Mosaic selected tiles, limited to the buffered calculation bounds.
+
+    The bounds are expanded outward to the tile pixel grid before merging.
+    rasterio's merge floors fractional destination windows, which would
+    otherwise leave a one-pixel nodata strip along the last covered edge
+    even when the tiles fully cover the requested bounds.
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with ExitStack() as stack:
         datasets = [stack.enter_context(rasterio.open(path)) for path in tile_paths]
+        reference = datasets[0].transform
+        west, south, east, north = analysis_bounds
+        snapped_bounds = (
+            reference.c + math.floor((west - reference.c) / reference.a) * reference.a,
+            reference.f + math.ceil((south - reference.f) / reference.e) * reference.e,
+            reference.c + math.ceil((east - reference.c) / reference.a) * reference.a,
+            reference.f + math.floor((north - reference.f) / reference.e) * reference.e,
+        )
         mosaic, transform = merge(
-            datasets, bounds=analysis_bounds, nodata=datasets[0].nodata
+            datasets, bounds=snapped_bounds, nodata=datasets[0].nodata
         )
         metadata = datasets[0].meta.copy()
     metadata.update(

@@ -21,7 +21,11 @@ from __future__ import annotations
 from storm_water_management.config import AnalysisConfig, DownloadConfig, PySwmmConfig
 from storm_water_management.depth_polygons import write_depth_class_polygons
 from storm_water_management.elevation_download import download_elevation_tiles
-from storm_water_management.plotting import create_pyswmm_plot, create_terrain_plot
+from storm_water_management.plotting import (
+    create_nodata_plot,
+    create_pyswmm_plot,
+    create_terrain_plot,
+)
 from storm_water_management.pyswmm_model import (
     run_pyswmm_analysis,
     write_water_depth_raster,
@@ -32,6 +36,7 @@ __all__ = [
     "AnalysisConfig",
     "DownloadConfig",
     "PySwmmConfig",
+    "create_nodata_plot",
     "create_pyswmm_plot",
     "create_terrain_plot",
     "download_elevation_tiles",
